@@ -127,7 +127,17 @@ export default function App() {
   };
 
   const handleInputChange = (field: string, value: string) => setInputs(prev => ({ ...prev, [field]: value }));
-  const openMap = (name: string) => window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name)}`, '_blank');
+  const openMap = (name: string) => {
+    if (!name) return;
+    const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name)}`;
+    // 偵測如果是手機 (iOS/Android)，直接跳轉來喚醒 Google Maps App，避免殘留白畫面
+    if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+      window.location.href = url;
+    } else {
+      // 電腦版維持開新分頁，避免蓋掉原來的網頁
+      window.open(url, '_blank');
+    }
+  };
   const rmDest = (name: string) => setDestinations(prev => prev.filter(d => d.name !== name));
 
   // --- 📍 手動新增景點 (自動抓座標與資訊) ---
