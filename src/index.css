@@ -1,1 +1,66 @@
 @import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', 'Noto Sans TC', -apple-system, BlinkMacSystemFont, sans-serif;
+    background-color: #dfece5;
+    color: #162a22;
+    margin: 0;
+    padding: 0;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior-y: none;
+  }
+}
+
+/* Custom utility classes for Tabi book pages & scrollbars */
+.tabi-scroll::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.tabi-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.tabi-scroll::-webkit-scrollbar-thumb {
+  background: rgba(26, 93, 66, 0.18);
+  border-radius: 9999px;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Horizontal Day Selector Strip - Explicitly allow horizontal touch pan inside StPageFlip */
+.day-strip-scroll {
+  touch-action: pan-x !important;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(26, 93, 66, 0.35) rgba(26, 93, 66, 0.06);
+}
+.day-strip-scroll::-webkit-scrollbar {
+  height: 5px;
+}
+.day-strip-scroll::-webkit-scrollbar-track {
+  background: rgba(26, 93, 66, 0.06);
+  border-radius: 9999px;
+}
+.day-strip-scroll::-webkit-scrollbar-thumb {
+  background: rgba(26, 93, 66, 0.35);
+  border-radius: 9999px;
+}
+
+/* StPageFlip 3D Book Container Overrides */
+.stf__parent {
+  margin: 0 auto !important;
+}
+
+.tabi-book-page {
+  background-color: #EDF6F1;
+  box-sizing: border-box;
+  overflow: hidden;
+  user-select: none;
+  box-shadow: inset 0 0 24px rgba(18, 55, 42, 0.04);
+}

@@ -1,0 +1,25 @@
+{
+  "id": "/",
+  "name": "去旅行啦 — Amazing Travel PWA",
+  "short_name": "去旅行啦",
+  "description": "具備 3D 書本翻頁效果 (StPageFlip) 與離線儲存的旅遊行程與消費記帳 PWA",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#EAF3EE",
+  "theme_color": "#EAF3EE",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

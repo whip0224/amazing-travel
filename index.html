@@ -2,12 +2,24 @@
 <html lang="zh-TW">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Amazing Trip Plan</title>
-    
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#EAF3EE" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="去旅行啦" />
+    <meta name="description" content="具備 3D 書本翻頁效果 (StPageFlip)、目的地清單排程、智慧景點配圖、國際機場搜尋與離線記帳的旅遊規劃 PWA。" />
+    <meta property="og:title" content="去旅行啦 — Amazing Travel PWA" />
+    <meta property="og:description" content="具備 3D 書本翻頁效果 (StPageFlip)、目的地清單排程、智慧景點配圖、國際機場搜尋與離線記帳的旅遊規劃 PWA。" />
+    <title>去旅行啦 — Amazing Travel PWA</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <!-- 🌍 把 Google Maps API 放在這個位置 -->
-    <script src="https://maps.googleapis.com/maps/api/js?key=%VITE_GOOGLE_MAPS_API_KEY%&libraries=places"></script>
+    <script src="https://maps.googleapis.com/maps/api/js?key=%VITE_GOOGLE_MAPS_API_KEY%&libraries=places" async defer></script>
   </head>
   <body>
     <div id="root"></div>

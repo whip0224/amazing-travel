@@ -1,0 +1,5 @@
+{
+  "name": "去旅行啦 — Amazing Travel PWA",
+  "description": "具備 3D 書本翻頁效果 (StPageFlip)、目的地清單排程、智慧景點配圖、國際機場搜尋與離線記帳的旅遊規劃 PWA。",
+  "requestFramePermissions": []
+}
