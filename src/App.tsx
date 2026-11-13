@@ -389,6 +389,7 @@ export default function App() {
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<
     ExpenseCategoryKey | 'all'
   >('all');
+  const [expenseSearchQuery, setExpenseSearchQuery] = useState<string>('');
   const [showCloudShareModal, setShowCloudShareModal] = useState(false);
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [showBudgetEditModal, setShowBudgetEditModal] = useState(false);
@@ -398,7 +399,7 @@ export default function App() {
   const [manualDestInput, setManualDestInput] = useState('');
   const [isSearchingPlace, setIsSearchingPlace] = useState(false);
   const [expandedDestId, setExpandedDestId] = useState<string | null>(null);
-  const [planDestPoolExpanded, setPlanDestPoolExpanded] = useState<boolean>(true);
+  const [planDestPoolExpanded, setPlanDestPoolExpanded] = useState<boolean>(false);
   const [showImportJsonModal, setShowImportJsonModal] = useState<boolean>(false);
   const [importJsonText, setImportJsonText] = useState<string>('');
 
@@ -566,6 +567,39 @@ export default function App() {
     }
     return arr;
   }, [state.trip.startDate, state.trip.endDate]);
+
+  // 根據出發日期與回程日期，自動計算生成「卡片日期顯示文字」（例如 Apr 12–17, 2027 · 5 Nights）
+  const formatTripDateRangeLabel = (startStr: string, endStr: string): string => {
+    const s = new Date(`${startStr}T00:00:00`);
+    const e = new Date(`${endStr}T00:00:00`);
+    if (isNaN(s.getTime()) || isNaN(e.getTime()) || s > e) {
+      return `${startStr} ~ ${endStr}`;
+    }
+    const diffDays = Math.round((e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24));
+    const nightsText = diffDays === 0 ? '1 Day' : `${diffDays} Night${diffDays > 1 ? 's' : ''}`;
+    const sMonth = s.toLocaleDateString('en-US', { month: 'short' });
+    const eMonth = e.toLocaleDateString('en-US', { month: 'short' });
+    const sDay = s.getDate();
+    const eDay = e.getDate();
+    const sYear = s.getFullYear();
+    const eYear = e.getFullYear();
+
+    if (sYear === eYear && s.getMonth() === e.getMonth()) {
+      if (sDay === eDay) {
+        return `${sMonth} ${sDay}, ${sYear} · ${nightsText}`;
+      }
+      return `${sMonth} ${sDay}–${eDay}, ${sYear} · ${nightsText}`;
+    }
+    if (sYear === eYear) {
+      return `${sMonth} ${sDay} – ${eMonth} ${eDay}, ${sYear} · ${nightsText}`;
+    }
+    return `${sMonth} ${sDay}, ${sYear} – ${eMonth} ${eDay}, ${eYear} · ${nightsText}`;
+  };
+
+  const autoDateRangeLabel = useMemo(
+    () => formatTripDateRangeLabel(state.trip.startDate, state.trip.endDate),
+    [state.trip.startDate, state.trip.endDate]
+  );
 
   // 當選中的 Day 超出新的日期範圍時自動修正，並自動將水平日期列捲動至選中的日期按鈕中央
   useEffect(() => {
@@ -935,6 +969,42 @@ export default function App() {
     return null;
   }, [state.expenses]);
 
+  // 🏷️ 自動從現有消費紀錄的「店家或備註 (shopOrNote)」擷取常用景點/店家標籤，方便一鍵點擊篩選
+  const uniqueExpenseShopTags = useMemo(() => {
+    const tagSet = new Set<string>();
+    state.expenses.forEach((item) => {
+      const raw = (item.shopOrNote || '').trim();
+      if (!raw || raw === '旅途消費') return;
+      // 支援以「·」、「・」、「、」或逗號分隔的子標籤，同時保留完整店名
+      tagSet.add(raw);
+      raw
+        .split(/[·・,，/]+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 2 && s.length <= 14)
+        .forEach((part) => tagSet.add(part));
+    });
+    return Array.from(tagSet).slice(0, 10);
+  }, [state.expenses]);
+
+  // 🔍 依「消費類別」與「店家或備註關鍵字 (expenseSearchQuery)」過濾後的消費明細與總支出小計
+  const filteredExpenses = useMemo(() => {
+    const q = expenseSearchQuery.trim().toLowerCase();
+    return state.expenses.filter((item) => {
+      const matchCat =
+        selectedCategoryFilter === 'all' ? true : item.category === selectedCategoryFilter;
+      if (!matchCat) return false;
+      if (!q) return true;
+      const shopNote = (item.shopOrNote || '').toLowerCase();
+      const title = (item.title || '').toLowerCase();
+      return shopNote.includes(q) || title.includes(q);
+    });
+  }, [state.expenses, selectedCategoryFilter, expenseSearchQuery]);
+
+  const filteredExpensesTotalJPY = useMemo(
+    () => filteredExpenses.reduce((sum, item) => sum + (Number(item.amountJPY) || 0), 0),
+    [filteredExpenses]
+  );
+
   // 🌸 根據目前「目的地」與「出發日期」自動計算：
   // 1) Trips 圖片下方的季節/氣候提示列
   // 2) Discover 私房景點與美食靈感清單
@@ -1255,7 +1325,6 @@ export default function App() {
     });
 
     if (addedCount > 0 || updatedCount > 0) {
-      setPlanDestPoolExpanded(true);
       showToast(
         `🎉 已從 Amazing Location 成功匯入 ${addedCount} 個新景點${
           updatedCount > 0 ? `（並同步更新 ${updatedCount} 個現有景點的分類與標籤）` : ''
@@ -1607,14 +1676,14 @@ export default function App() {
     showToast(`✏️ 已更新「${newName}」的景點名稱與區域標籤！`);
   };
 
-  // --- 🖼️ 一鍵根據目的地自動找尋/生成相關行程圖片 ---
+  // --- 🖼️ 一鍵根據目的地自動找尋/生成相關行程圖片（一次更新所有天數的已排程行程與目的地清單圖片） ---
   const handleGenerateItineraryPhotos = async () => {
     if (isGeneratingPhotos) return;
     setIsGeneratingPhotos(true);
 
     try {
-      const dayActs = state.activities.filter((a) => a.dayIndex === selectedDay);
-      const targets = dayActs.length > 0 ? dayActs : state.activities;
+      // 修正：不再只過濾 selectedDay，而是針對「所有日期的全部已排程活動 (state.activities)」一併尋找並更新圖片
+      const targets = state.activities;
 
       if (targets.length === 0 && state.destinations.length === 0) {
         showToast('⚠️ 請先在目的地清單新增或排入行程');
@@ -1625,8 +1694,12 @@ export default function App() {
       const updatedDestPhotos: Record<string, { photoUrl: string; photoBadge: string }> = {};
 
       let count = 0;
-      const total = targets.length + state.destinations.filter((d) => !d.photoUrl).length;
+      const unscheduledDests = state.destinations.filter(
+        (d) => !targets.some((a) => a.sourceDestId === d.id)
+      );
+      const total = targets.length + unscheduledDests.length;
 
+      // 1. 先為所有天數 (Day 1 ~ Day N) 的已排程活動搜尋專屬圖片
       for (const act of targets) {
         count++;
         setPhotoGenProgress(`${count}/${Math.max(count, total)}`);
@@ -1637,7 +1710,8 @@ export default function App() {
         }
       }
 
-      for (const dest of state.destinations) {
+      // 2. 再為尚未排程的目的地清單項目補齊圖片
+      for (const dest of unscheduledDests) {
         if (!updatedDestPhotos[dest.id]) {
           count++;
           setPhotoGenProgress(`${count}/${Math.max(count, total)}`);
@@ -1651,15 +1725,18 @@ export default function App() {
 
       setState((prev) => ({
         ...prev,
-        activities: prev.activities.map((a) =>
-          updatedActPhotos[a.id]
+        activities: prev.activities.map((a) => {
+          const matched =
+            updatedActPhotos[a.id] ||
+            (a.sourceDestId ? updatedDestPhotos[a.sourceDestId] : undefined);
+          return matched
             ? {
                 ...a,
-                photoUrl: updatedActPhotos[a.id].photoUrl,
-                photoBadge: updatedActPhotos[a.id].photoBadge,
+                photoUrl: matched.photoUrl,
+                photoBadge: matched.photoBadge,
               }
-            : a
-        ),
+            : a;
+        }),
         destinations: prev.destinations.map((d) =>
           updatedDestPhotos[d.id]
             ? {
@@ -1671,7 +1748,7 @@ export default function App() {
         ),
       }));
 
-      showToast('🖼️ 已根據目的地名稱自動找尋並更新所有行程相關圖片！');
+      showToast(`🖼️ 已完成全部 ${targets.length} 個行程景點（含所有天數）的相關圖片更新！`);
     } catch (err) {
       console.error(err);
       showToast('⚠️ 圖片搜尋過程中發生部分錯誤，已套用備用插畫');
@@ -2790,7 +2867,7 @@ export default function App() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5 text-[13px] font-bold text-[#FCE5DC] drop-shadow-xs mb-0.5">
                           <CalendarCheck className="w-4 h-4 text-[#FADBD0] shrink-0" />
-                          <span className="truncate">{state.trip.dateRangeLabel}</span>
+                          <span className="truncate">{autoDateRangeLabel}</span>
                         </div>
                         <h1 className="text-[31px] font-extrabold tracking-tight leading-none drop-shadow-sm truncate">
                           {state.trip.destinationTitle}
@@ -3417,8 +3494,8 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 🕒 垂直時間軸與行程卡片清單 */}
-                <div className="relative pl-12 space-y-5 pt-1">
+                {/* 🕒 垂直時間軸與行程卡片清單 (加上嚴格寬度與 overflow 防護，避免長地址撐開卡片導致手機畫面左移) */}
+                <div className="relative pl-12 space-y-5 pt-1 max-w-full overflow-hidden">
                   <div className="absolute left-[21px] top-6 bottom-8 w-[2px] bg-[#CFE0D7]" />
 
                   {dayActivities.length === 0 ? (
@@ -3456,7 +3533,7 @@ export default function App() {
                           : 'bg-[#D7E8FA] text-[#194E82]';
 
                       return (
-                        <div key={act.id} className="relative">
+                        <div key={act.id} className="relative min-w-0 max-w-full">
                           {/* 左側時間與圓點 */}
                           <div className="absolute -left-12 top-1 w-11 flex flex-col items-center">
                             <span className="text-[11.5px] font-extrabold text-[#1D3028] tabular-nums">
@@ -3468,9 +3545,9 @@ export default function App() {
                           </div>
 
                           {/* 右側白底行程卡片 */}
-                          <div className="bg-white rounded-[26px] p-4 shadow-sm border border-[#E2EFE8] space-y-2.5">
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="flex items-center gap-2.5">
+                          <div className="bg-white rounded-[26px] p-4 shadow-sm border border-[#E2EFE8] space-y-2.5 min-w-0 max-w-full overflow-hidden">
+                            <div className="flex items-start justify-between gap-2 min-w-0">
+                              <div className="flex items-center gap-2.5 min-w-0 flex-1">
                                 <div
                                   className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${iconBoxClass}`}
                                 >
@@ -3482,21 +3559,21 @@ export default function App() {
                                     <Sunset className="w-4 h-4" />
                                   )}
                                 </div>
-                                <div>
+                                <div className="min-w-0 flex-1">
                                   <div
-                                    className={`text-[11px] font-extrabold tracking-wider uppercase leading-tight ${kickerColorClass}`}
+                                    className={`text-[11px] font-extrabold tracking-wider uppercase leading-tight truncate ${kickerColorClass}`}
                                   >
                                     {act.kicker}
                                   </div>
-                                  <div className="text-[11.5px] text-[#786860] font-medium">
+                                  <div className="text-[11.5px] text-[#786860] font-medium truncate">
                                     {act.duration}
                                   </div>
                                 </div>
                               </div>
 
-                              <div className="flex items-center gap-1" data-no-flip="true">
+                              <div className="flex items-center gap-1 shrink-0" data-no-flip="true">
                                 <span
-                                  className={`px-2.5 py-1 rounded-full text-[10.5px] font-extrabold ${pillBadgeClass}`}
+                                  className={`px-2.5 py-1 rounded-full text-[10.5px] font-extrabold shrink-0 ${pillBadgeClass}`}
                                 >
                                   {act.badgeText}
                                 </span>
@@ -3527,22 +3604,24 @@ export default function App() {
                               </div>
                             </div>
 
-                            <div>
-                              <h3 className="text-[18px] font-extrabold text-[#14251E] leading-snug">
+                            <div className="min-w-0 max-w-full overflow-hidden">
+                              <h3 className="text-[18px] font-extrabold text-[#14251E] leading-snug break-words">
                                 {act.title}
                               </h3>
                               <button
                                 type="button"
                                 onClick={() => openGoogleMaps(`${act.title} ${act.location}`)}
-                                className="flex items-center gap-1 text-[12.5px] font-bold text-[#1D6B4B] hover:underline mt-0.5 text-left"
+                                className="flex items-center gap-1 text-[12.5px] font-bold text-[#1D6B4B] hover:underline mt-0.5 text-left w-full max-w-full min-w-0 overflow-hidden"
                                 data-no-flip="true"
                               >
                                 <MapPin className="w-3.5 h-3.5 shrink-0" />
-                                <span className="truncate">{act.location}</span>
+                                <span className="truncate block flex-1 min-w-0">
+                                  {act.location}
+                                </span>
                               </button>
                             </div>
 
-                            <div className="rounded-xl bg-[#EAF4EF] p-3 text-[12px] text-[#4A5E54] leading-relaxed">
+                            <div className="rounded-xl bg-[#EAF4EF] p-3 text-[12px] text-[#4A5E54] leading-relaxed break-words">
                               {act.note}
                             </div>
 
@@ -4141,9 +4220,63 @@ export default function App() {
                     })}
                   </div>
 
-                  {/* 展開的單筆消費明細清單 */}
+                  {/* 展開的單筆消費明細清單 (支援「🏷️ 標籤搜尋」篩選店家或備註，並即時計算特定景點/店家總支出) */}
                   {showExpenseDetailList && (
-                    <div className="bg-white rounded-[24px] p-4 border border-[#CFE3D8] shadow-xs space-y-2.5">
+                    <div className="bg-white rounded-[24px] p-4 border border-[#CFE3D8] shadow-xs space-y-3">
+                      {/* 🔍 標籤搜尋輸入框 (篩選「店家或備註」欄位) */}
+                      <div className="space-y-2">
+                        <div className="relative flex items-center">
+                          <Search className="w-4 h-4 text-[#4A6357] absolute left-3 pointer-events-none" />
+                          <input
+                            type="text"
+                            value={expenseSearchQuery}
+                            onChange={(e) => setExpenseSearchQuery(e.target.value)}
+                            placeholder="標籤搜尋：輸入景點、店家或備註關鍵字 (如：祇園、Donki)..."
+                            className="w-full pl-9 pr-8 py-2 rounded-xl bg-[#F4FAF6] border border-[#CFE3D8] text-xs font-bold text-[#14241D] placeholder:text-[#758C81] focus:outline-none focus:border-[#1A5D42] focus:bg-white transition"
+                          />
+                          {expenseSearchQuery && (
+                            <button
+                              type="button"
+                              onClick={() => setExpenseSearchQuery('')}
+                              title="清除搜尋關鍵字"
+                              className="w-5 h-5 rounded-full bg-[#DCEAE2] hover:bg-[#c8ddd1] text-[#355245] flex items-center justify-center absolute right-2.5 text-[10px] font-black transition"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+
+                        {/* 🏷️ 快速店家/景點標籤按鈕列 */}
+                        {uniqueExpenseShopTags.length > 0 && (
+                          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 tabi-scroll">
+                            <span className="text-[10.5px] font-extrabold text-[#5B7368] shrink-0">
+                              🏷️ 快速標籤:
+                            </span>
+                            {uniqueExpenseShopTags.map((tag) => {
+                              const isActive =
+                                expenseSearchQuery.trim().toLowerCase() === tag.toLowerCase();
+                              return (
+                                <button
+                                  key={tag}
+                                  type="button"
+                                  onClick={() =>
+                                    setExpenseSearchQuery(isActive ? '' : tag)
+                                  }
+                                  className={`px-2 py-0.5 rounded-lg text-[10.5px] font-extrabold shrink-0 transition ${
+                                    isActive
+                                      ? 'bg-[#DF6437] text-white shadow-2xs'
+                                      : 'bg-[#F0F7F3] hover:bg-[#E1EFE8] text-[#2F5243] border border-[#DCEAE2]'
+                                  }`}
+                                >
+                                  #{tag}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 類別篩選膠囊列 */}
                       <div className="flex items-center justify-between border-b border-[#E6F0EB] pb-2">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <button
@@ -4174,67 +4307,98 @@ export default function App() {
                         </div>
                       </div>
 
+                      {/* 💰 當前搜尋 / 篩選結果的「特定景點/店家總支出」統計橫幅 */}
+                      {(expenseSearchQuery.trim() !== '' || selectedCategoryFilter !== 'all') && (
+                        <div className="px-3 py-2 rounded-xl bg-[#EAF4EF] border border-[#BFE0D0] flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className="text-[11px] font-extrabold text-[#16573C] truncate block">
+                              {expenseSearchQuery.trim()
+                                ? `🏷️ 「${expenseSearchQuery.trim()}」相關支出 (${filteredExpenses.length} 筆)`
+                                : `📂 類別篩選小計 (${filteredExpenses.length} 筆)`}
+                            </span>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <span className="text-[13.5px] font-black text-[#B83E1B] tabular-nums">
+                              總計 ¥{filteredExpensesTotalJPY.toLocaleString()}
+                            </span>
+                            <span className="text-[10.5px] font-bold text-[#4A6357] ml-1.5 tabular-nums">
+                              (≈ {curBObj.symbol}
+                              {convertAmount(
+                                filteredExpensesTotalJPY,
+                                'JPY',
+                                state.currencyB
+                              ).toLocaleString(undefined, {
+                                minimumFractionDigits:
+                                  state.currencyB === 'JPY' || state.currencyB === 'KRW' ? 0 : 2,
+                                maximumFractionDigits:
+                                  state.currencyB === 'JPY' || state.currencyB === 'KRW' ? 0 : 2,
+                              })}
+                              )
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
                       <div className="space-y-2 max-h-60 overflow-y-auto pr-1 tabi-scroll">
-                        {state.expenses
-                          .filter((item) =>
-                            selectedCategoryFilter === 'all'
-                              ? true
-                              : item.category === selectedCategoryFilter
-                          )
-                          .map((item) => (
-                            <div
-                              key={item.id}
-                              onClick={() => openEditExpenseModal(item)}
-                              title="點擊修改數量或價錢"
-                              className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[#F4FAF6] hover:bg-[#EAF4EF] border border-[#E2EFE8] cursor-pointer transition"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <div className="text-[13.5px] font-extrabold text-[#162921] truncate">
-                                  {item.title}
-                                </div>
-                                <div className="text-[11px] text-[#665850] truncate">
-                                  {item.shopOrNote} · {item.createdAt}
-                                </div>
+                        {filteredExpenses.map((item) => (
+                          <div
+                            key={item.id}
+                            onClick={() => openEditExpenseModal(item)}
+                            title="點擊修改數量或價錢"
+                            className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[#F4FAF6] hover:bg-[#EAF4EF] border border-[#E2EFE8] cursor-pointer transition"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="text-[13.5px] font-extrabold text-[#162921] truncate">
+                                {item.title}
                               </div>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <div className="text-right mr-1">
-                                  <div className="text-[13.5px] font-extrabold text-[#162921] tabular-nums">
-                                    ¥{item.amountJPY.toLocaleString()}
-                                  </div>
-                                  {item.originalCurrency !== 'JPY' && (
-                                    <div className="text-[10px] text-[#6E5D54] tabular-nums">
-                                      ({item.originalAmount} {item.originalCurrency})
-                                    </div>
-                                  )}
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    openEditExpenseModal(item);
-                                  }}
-                                  title="修改數量或價錢"
-                                  className="w-7 h-7 rounded-full bg-[#E1F1E9] hover:bg-[#cce6d9] text-[#1A5D42] flex items-center justify-center transition"
-                                >
-                                  <Edit3 className="w-3.5 h-3.5" />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleDeleteExpense(item.id);
-                                  }}
-                                  title="刪除此筆消費"
-                                  className="w-7 h-7 rounded-full bg-[#FBE4DF] hover:bg-[#f5cdc4] text-[#B53D1B] flex items-center justify-center transition"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
+                              <div className="text-[11px] text-[#665850] truncate flex items-center gap-1 mt-0.5">
+                                <span className="px-1.5 py-0.2 rounded bg-white border border-[#DCEAE2] text-[#1A5D42] text-[10px] font-extrabold truncate max-w-[170px]">
+                                  📍 {item.shopOrNote}
+                                </span>
+                                <span className="shrink-0">· {item.createdAt}</span>
                               </div>
                             </div>
-                          ))}
-                        {state.expenses.length === 0 && (
-                          <div className="text-center py-6 text-xs text-[#6E7F77]">
-                            目前尚無消費紀錄，點擊下方按鈕新增第一筆支出！
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <div className="text-right mr-1">
+                                <div className="text-[13.5px] font-extrabold text-[#162921] tabular-nums">
+                                  ¥{item.amountJPY.toLocaleString()}
+                                </div>
+                                {item.originalCurrency !== 'JPY' && (
+                                  <div className="text-[10px] text-[#6E5D54] tabular-nums">
+                                    ({item.originalAmount} {item.originalCurrency})
+                                  </div>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openEditExpenseModal(item);
+                                }}
+                                title="修改數量或價錢"
+                                className="w-7 h-7 rounded-full bg-[#E1F1E9] hover:bg-[#cce6d9] text-[#1A5D42] flex items-center justify-center transition"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteExpense(item.id);
+                                }}
+                                title="刪除此筆消費"
+                                className="w-7 h-7 rounded-full bg-[#FBE4DF] hover:bg-[#f5cdc4] text-[#B53D1B] flex items-center justify-center transition"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                        {filteredExpenses.length === 0 && (
+                          <div className="text-center py-6 text-xs text-[#6E7F77] font-bold">
+                            {expenseSearchQuery.trim()
+                              ? `找不到店家或備註包含「${expenseSearchQuery.trim()}」的消費紀錄`
+                              : '目前尚無消費紀錄，點擊下方按鈕新增第一筆支出！'}
                           </div>
                         )}
                       </div>
@@ -5401,7 +5565,7 @@ export default function App() {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3"
+            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3 overflow-hidden"
           >
             <div className="flex items-center justify-between border-b border-[#EBF3EE] pb-2">
               <div>
@@ -5413,7 +5577,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowTripModal(false)}
-                className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center"
+                className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -5450,54 +5614,60 @@ export default function App() {
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
-              <div>
+            {/* 出發日期與回程日期改為垂直滿版排列，徹底解決 iPhone Safari 日期選擇器超出視窗右緣問題 */}
+            <div className="grid grid-cols-1 gap-2.5">
+              <div className="min-w-0">
                 <label className="text-xs font-bold text-[#4A6357] block mb-1">
                   出發日期 (Start Date)
                 </label>
                 <input
                   type="date"
                   value={state.trip.startDate}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const nextStart = e.target.value;
                     setState((prev) => ({
                       ...prev,
-                      trip: { ...prev.trip, startDate: e.target.value },
-                    }))
-                  }
-                  className="w-full px-3 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold"
+                      trip: {
+                        ...prev.trip,
+                        startDate: nextStart,
+                        dateRangeLabel: formatTripDateRangeLabel(nextStart, prev.trip.endDate),
+                      },
+                    }));
+                  }}
+                  className="w-full max-w-full min-w-0 block px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
                 />
               </div>
-              <div>
+              <div className="min-w-0">
                 <label className="text-xs font-bold text-[#4A6357] block mb-1">
                   回程日期 (End Date)
                 </label>
                 <input
                   type="date"
                   value={state.trip.endDate}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const nextEnd = e.target.value;
                     setState((prev) => ({
                       ...prev,
-                      trip: { ...prev.trip, endDate: e.target.value },
-                    }))
-                  }
-                  className="w-full px-3 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold"
+                      trip: {
+                        ...prev.trip,
+                        endDate: nextEnd,
+                        dateRangeLabel: formatTripDateRangeLabel(prev.trip.startDate, nextEnd),
+                      },
+                    }));
+                  }}
+                  className="w-full max-w-full min-w-0 block px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
                 />
               </div>
             </div>
 
-            <div>
-              <label className="text-xs font-bold text-[#4A6357] block mb-1">卡片日期顯示文字</label>
-              <input
-                type="text"
-                value={state.trip.dateRangeLabel}
-                onChange={(e) =>
-                  setState((prev) => ({
-                    ...prev,
-                    trip: { ...prev.trip, dateRangeLabel: e.target.value },
-                  }))
-                }
-                className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
-              />
+            {/* 自動計算生成的卡片日期顯示文字預覽 */}
+            <div className="p-2.5 rounded-xl bg-[#EAF4EF] border border-[#CFE3D8] flex items-center justify-between gap-2">
+              <span className="text-[11px] font-bold text-[#355245] shrink-0">
+                📅 卡片日期顯示（自動計算）
+              </span>
+              <span className="text-xs font-extrabold text-[#1A5D42] truncate">
+                {autoDateRangeLabel}
+              </span>
             </div>
 
             <div>
