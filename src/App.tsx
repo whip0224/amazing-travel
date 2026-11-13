@@ -30,7 +30,6 @@ import {
   CheckCircle2,
   Trash2,
   Edit3,
-  BookOpen,
   Download,
   WifiOff,
   ChevronLeft,
@@ -48,7 +47,11 @@ import {
   ArrowDown,
   Wand2,
   Hand,
+  Search,
+  Globe,
+  PieChart as PieChartIcon,
 } from 'lucide-react';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import { CURRENCIES, type AirportItem } from './airports.js';
 import {
   DEFAULT_TABI_STATE,
@@ -71,6 +74,16 @@ import {
   type AIOptimizationResult,
   type OptimizeMode,
 } from './utils/aiItineraryOptimizer';
+import { searchHotelCandidates, type HotelCandidate } from './utils/hotelFinder';
+import {
+  convertAmazingLocationItem,
+  readSameOriginAmazingLocations,
+} from './utils/amazingLocationBridge';
+import {
+  getDynamicSeasonalBanner,
+  getCuratedGemsForDestination,
+  getTreatsForDestination,
+} from './utils/destinationRecommendations';
 
 // --- Firebase 初始化 (保留原有專案雲端連線架構) ---
 const firebaseConfig = {
@@ -95,12 +108,57 @@ try {
 const STORAGE_KEY_V2 = 'tabi_pwa_state_v2';
 const LEGACY_STORAGE_KEY = 'at_local_data_final_v1';
 
-// 讀取 LocalStorage 初始資料 (確保 F5 重整或離線時資料完整保留)
+// 讀取 LocalStorage 初始資料 (確保刪除預設景點、清空或編輯後重開 App 100% 保留最後狀態)
 const loadInitialTabiState = (): TabiState => {
   try {
     const saved = localStorage.getItem(STORAGE_KEY_V2);
     if (saved) {
       const parsed = JSON.parse(saved);
+      const rawTrip = { ...DEFAULT_TABI_STATE.trip, ...(parsed.trip || {}) };
+      if (rawTrip.subtitle === 'Ancient temples, moss gardens & late-night ramen runs') {
+        rawTrip.subtitle = DEFAULT_TABI_STATE.trip.subtitle;
+      }
+      if (rawTrip.weatherTitle === 'Cherry blossom peak week!') {
+        rawTrip.weatherTitle = DEFAULT_TABI_STATE.trip.weatherTitle;
+      }
+      if (rawTrip.weatherSub === 'Kyoto 22°C · Mild breeze & sun') {
+        rawTrip.weatherSub = DEFAULT_TABI_STATE.trip.weatherSub;
+      }
+      if (rawTrip.weatherBadge === 'Perfect timing!') {
+        rawTrip.weatherBadge = DEFAULT_TABI_STATE.trip.weatherBadge;
+      }
+      if (rawTrip.icocaTitle === 'ICOCA Card reloaded!') {
+        rawTrip.icocaTitle = DEFAULT_TABI_STATE.trip.icocaTitle;
+      }
+      if (rawTrip.icocaSub?.includes('ready for subway & vending machines')) {
+        rawTrip.icocaSub = `¥${(rawTrip.icocaBalance || 5000).toLocaleString()} 隨時可搭地鐵、巴士與投販賣機`;
+      }
+      if (!rawTrip.heroPhotoUrl) {
+        rawTrip.heroPhotoUrl = DEFAULT_TABI_STATE.trip.heroPhotoUrl;
+      }
+
+      const rawStay = { ...DEFAULT_TABI_STATE.stay, ...(parsed.stay || {}) };
+      if (rawStay.insiderScoop?.includes('Front desk has secret matcha')) {
+        rawStay.insiderScoop = DEFAULT_TABI_STATE.stay.insiderScoop;
+      }
+      if (rawStay.tag1 === 'River View') rawStay.tag1 = DEFAULT_TABI_STATE.stay.tag1;
+      if (rawStay.tag2 === 'Free Breakfast') rawStay.tag2 = DEFAULT_TABI_STATE.stay.tag2;
+
+      const rawActivities: PlanActivity[] = Array.isArray(parsed.activities)
+        ? parsed.activities.map((a: PlanActivity) => {
+            if (a.id === 'act-1' && a.note?.includes('Don\'t skip the fresh tamagoyaki')) {
+              return { ...a, ...DEFAULT_TABI_STATE.activities[0], time: a.time, dayIndex: a.dayIndex };
+            }
+            if (a.id === 'act-2' && a.note?.includes('Hilltop panoramic views')) {
+              return { ...a, ...DEFAULT_TABI_STATE.activities[1], time: a.time, dayIndex: a.dayIndex };
+            }
+            if (a.id === 'act-3' && a.note?.includes('Lantern-lit wooden machiya')) {
+              return { ...a, ...DEFAULT_TABI_STATE.activities[2], time: a.time, dayIndex: a.dayIndex };
+            }
+            return a;
+          })
+        : DEFAULT_TABI_STATE.activities;
+
       return {
         ...DEFAULT_TABI_STATE,
         ...parsed,
@@ -112,24 +170,20 @@ const loadInitialTabiState = (): TabiState => {
           typeof parsed.swipeEdgeOnly === 'boolean' ? parsed.swipeEdgeOnly : true,
         swipePolicyVersion: 3,
         trip: {
-          ...DEFAULT_TABI_STATE.trip,
-          ...(parsed.trip || {}),
-          memoryTag: (parsed.trip?.memoryTag || DEFAULT_TABI_STATE.trip.memoryTag).replace(
+          ...rawTrip,
+          memoryTag: (rawTrip.memoryTag || DEFAULT_TABI_STATE.trip.memoryTag).replace(
             /^TABI/i,
             '去旅行啦'
           ),
         },
         outbound: { ...DEFAULT_TABI_STATE.outbound, ...(parsed.outbound || {}) },
         inbound: { ...DEFAULT_TABI_STATE.inbound, ...(parsed.inbound || {}) },
-        stay: { ...DEFAULT_TABI_STATE.stay, ...(parsed.stay || {}) },
-        destinations:
-          Array.isArray(parsed.destinations) && parsed.destinations.length > 0
-            ? parsed.destinations
-            : DEFAULT_TABI_STATE.destinations,
-        activities:
-          Array.isArray(parsed.activities) && parsed.activities.length > 0
-            ? parsed.activities
-            : DEFAULT_TABI_STATE.activities,
+        stay: rawStay,
+        // 關鍵修正：只要 parsed.destinations 為陣列（即使使用者刪光所有預設目的地變為 []），也必須忠實保留，不再回退至 DEFAULT_TABI_STATE
+        destinations: Array.isArray(parsed.destinations)
+          ? parsed.destinations
+          : DEFAULT_TABI_STATE.destinations,
+        activities: rawActivities,
         expenses: Array.isArray(parsed.expenses) ? parsed.expenses : DEFAULT_TABI_STATE.expenses,
       };
     }
@@ -139,12 +193,105 @@ const loadInitialTabiState = (): TabiState => {
   return DEFAULT_TABI_STATE;
 };
 
-// Book Page Index 對應:
-// Page 0 -> 'trips' (1. 來回程與住宿資訊頁)
-// Page 1 -> 'plan'  (2. 行程編排頁)
-// Page 2 -> 'tools' (3. 工具與行程消費)
-// Page 3 -> 'discover' (4. 目的地清單與匯入管理)
-const PAGE_ORDER: TabKey[] = ['trips', 'plan', 'tools', 'discover'];
+// Book Page Index 對應底部導覽列順序 (解決從 Discover 切換到 Trips 時先閃過 Plan 的問題):
+// Page 0 -> 'discover' (探索與行前百寶箱頁)
+// Page 1 -> 'trips'    (來回程與住宿資訊頁 - 預設首頁 startPage: 1)
+// Page 2 -> 'plan'     (行程編排頁)
+// Page 3 -> 'tools'    (工具與行程消費頁)
+const PAGE_ORDER: TabKey[] = ['discover', 'trips', 'plan', 'tools'];
+
+// 🗣️ 擴充版：旅途實用「手指日語 / 英語」溝通大字卡 (支援日文與英文切換)
+interface PhraseCardItem {
+  tag: string;
+  zh: string;
+  jp: string;
+  romaji: string;
+  en: string;
+  enSub: string;
+}
+
+const COMMUNICATION_CARDS: PhraseCardItem[] = [
+  {
+    tag: '🛍️ 免稅退稅',
+    zh: '請問可以辦理免稅 (Tax-Free) 嗎？',
+    jp: '免税（めんぜい）できますか？',
+    romaji: 'Menzei dekimasu ka?',
+    en: 'Can I get Tax-Free shopping here?',
+    enSub: 'I have my passport with me.',
+  },
+  {
+    tag: '🍜 餐廳點餐',
+    zh: '請給我這家店最推薦的人氣餐點！',
+    jp: 'おすすめのメニューをください！',
+    romaji: 'Osusume no menyū o kudasai!',
+    en: 'Could I have your most popular dish, please?',
+    enSub: 'What do you recommend?',
+  },
+  {
+    tag: '🥩 飲食禁忌',
+    zh: '我不吃牛肉 / 豬肉，請幫我去除。',
+    jp: '牛肉・豚肉が食べられません。抜いてもらえますか？',
+    romaji: 'Gyūniku / Butaniku ga taberaremasen. Nuite moraemasu ka?',
+    en: 'I cannot eat beef or pork. Could you prepare it without them?',
+    enSub: 'Dietary restriction request',
+  },
+  {
+    tag: '💳 結帳付款',
+    zh: '請問可以使用交通卡 (ICOCA/Suica) 或信用卡嗎？',
+    jp: '交通系ICカードやクレジットカードは使えますか？',
+    romaji: 'Kōtsū-kei IC kādo ya kurejitto kādo wa tsukaemasu ka?',
+    en: 'Do you accept IC transit cards or credit cards?',
+    enSub: 'Or is it cash only?',
+  },
+  {
+    tag: '🧾 分開結帳',
+    zh: '不好意思，請問可以分開結帳嗎？',
+    jp: 'すみません、別々（べつべつ）にお会計できますか？',
+    romaji: 'Sumimasen, betsubetsu ni okaikei dekimasu ka?',
+    en: 'Excuse me, could we pay separately?',
+    enSub: 'Separate checks, please.',
+  },
+  {
+    tag: '🧳 寄放行李',
+    zh: '請問入住前 / 退房後可以暫時寄放行李嗎？',
+    jp: '荷物を一時預かってもらえますか？',
+    romaji: 'Nimotsu o ichiji azukatte moraemasu ka?',
+    en: 'Could you hold my luggage for a few hours?',
+    enSub: 'Before check-in / after check-out',
+  },
+  {
+    tag: '🥡 打包外帶',
+    zh: '請問這個可以外帶 (Take out) 嗎？',
+    jp: 'これは持ち帰り（テイクアウト）できますか？',
+    romaji: 'Kore wa mochikaeri (teikuauto) dekimasu ka?',
+    en: 'Can I get this to go (take-out), please?',
+    enSub: 'Take-away request',
+  },
+  {
+    tag: '🚉 車站問路',
+    zh: '不好意思，請問去這個地址要搭哪一線？',
+    jp: 'すみません、この場所へはどの線に乗ればいいですか？',
+    romaji: 'Sumimasen, kono basho e wa dono sen ni noreba ii desu ka?',
+    en: 'Excuse me, which line should I take to get to this address?',
+    enSub: 'Showing destination on map',
+  },
+  {
+    tag: '🚕 叫計程車',
+    zh: '請載我去這個地址，謝謝！',
+    jp: 'この住所までお願いします！',
+    romaji: 'Kono jūsho made onegaishimasu!',
+    en: 'Please take me to this address. Thank you!',
+    enSub: 'For taxi driver',
+  },
+  {
+    tag: '💊 藥局求助',
+    zh: '請問有止痛藥 / 腸胃藥 / 感冒藥嗎？',
+    jp: '痛み止め・胃薬・風邪薬はありますか？',
+    romaji: 'Itamidome / Igusuri / Kazegusuri wa arimasu ka?',
+    en: 'Do you have painkillers, stomach medicine, or cold medicine?',
+    enSub: 'Pharmacy assistance',
+  },
+];
 
 const EXPENSE_CATEGORIES: {
   key: ExpenseCategoryKey;
@@ -238,6 +385,7 @@ export default function App() {
   const [showBaggageModal, setShowBaggageModal] = useState(false);
   const [showAddExpenseModal, setShowAddExpenseModal] = useState(false);
   const [showExpenseDetailList, setShowExpenseDetailList] = useState(false);
+  const [showExpensePieChart, setShowExpensePieChart] = useState(false);
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<
     ExpenseCategoryKey | 'all'
   >('all');
@@ -265,9 +413,15 @@ export default function App() {
     cost: '1500',
   });
 
-  // 更改景點名稱彈出視窗 (✏️ 編輯名稱)
+  // 編輯地點資訊彈出視窗 (✏️ 1:1 對應 Amazing Location 的 4 欄位編輯：店名 / 城市 / 區域 / 自訂標籤)
   const [renameModalDest, setRenameModalDest] = useState<SavedDestination | null>(null);
   const [renameInputVal, setRenameInputVal] = useState('');
+  const [editDestCityVal, setEditDestCityVal] = useState('');
+  const [editDestAreaVal, setEditDestAreaVal] = useState('');
+  const [editDestTagsVal, setEditDestTagsVal] = useState('');
+
+  // 目的地清單：依「城市/區域」快速篩選 (對應 Amazing Location 的分類篩選)
+  const [destCityFilter, setDestCityFilter] = useState<string>('全部');
 
   // 🖼️ 自動搜尋/生成行程相關圖片狀態
   const [isGeneratingPhotos, setIsGeneratingPhotos] = useState(false);
@@ -297,6 +451,18 @@ export default function App() {
     category: 'dining' as ExpenseCategoryKey,
   });
 
+  // ✏️ 修改支出表單狀態 (支援快速修正數量 ×N 與價錢)
+  const [editingExpense, setEditingExpense] = useState<ExpenseItem | null>(null);
+  const [editExpForm, setEditExpForm] = useState({
+    baseTitle: '',
+    quantity: 1,
+    unitAmount: 0,
+    amount: '',
+    currency: 'JPY',
+    category: 'dining' as ExpenseCategoryKey,
+    shopOrNote: '',
+  });
+
   // PWA 安裝與離線狀態
   const { isInstallable, isOnline, install } = usePWAInstall();
 
@@ -309,12 +475,23 @@ export default function App() {
       return ['passport', 'vjw', 'icoca'];
     }
   });
-  const [activePhraseModal, setActivePhraseModal] = useState<{
-    zh: string;
-    jp: string;
-    romaji: string;
-    tag: string;
-  } | null>(null);
+  const [phraseLang, setPhraseLang] = useState<'jp' | 'en'>('jp');
+  const [activePhraseModal, setActivePhraseModal] = useState<PhraseCardItem | null>(null);
+
+  // 🌸 Discover 私房景點與美食靈感：分類篩選與「換一批」分頁索引
+  const [gemCategoryFilter, setGemCategoryFilter] = useState<'all' | 'spot' | 'food'>('all');
+  const [gemBatchIndex, setGemBatchIndex] = useState<number>(0);
+
+  // 🍵 Tools 今日最新小確幸：根據目的地推薦索引 & 是否切換顯示最新記帳紀錄
+  const [treatIndex, setTreatIndex] = useState<number>(0);
+  const [showCustomLatestExpense, setShowCustomLatestExpense] = useState<boolean>(false);
+
+  // 🏨 住宿編輯 Modal：輸入飯店名稱自動搜尋地址 & 多分館選擇卡片狀態
+  const [hotelCandidates, setHotelCandidates] = useState<HotelCandidate[]>([]);
+  const [isSearchingHotelAddress, setIsSearchingHotelAddress] = useState(false);
+
+  // 🖼️ 編輯旅程目的地後自動找尋 Hero 主視覺圖片狀態
+  const [isSearchingHeroPhoto, setIsSearchingHeroPhoto] = useState(false);
 
   const togglePrepItem = (id: string) => {
     setCheckedPrepIds((prev) => {
@@ -415,10 +592,6 @@ export default function App() {
     const container = bookContainerRef.current;
     if (!container) return;
 
-    // 判斷此次點擊/觸控是否允許觸發 StPageFlip 翻頁：
-    // 1. 預設 enableSwipeFlip = false：完全關閉手指/滑鼠滑動翻頁，100% 不誤觸，僅由底部導覽列切換
-    // 2. 任何針對 input, textarea, select, button, a, label 或 [data-no-flip="true"] 的操作一律不觸發翻頁
-    // 3. 當開啟滑動且設定為「僅左右兩邊邊緣觸發 (swipeEdgeOnly = true)」時，只允許在畫面最左/最右側 24px 書邊區域啟動拖曳翻頁
     const EDGE_TRIGGER_WIDTH_PX = 24;
     const canStartFlipGesture = (clientX: number, target: EventTarget | null, rectEl: HTMLElement): boolean => {
       if (!enableSwipeFlipRef.current) return false;
@@ -458,13 +631,11 @@ export default function App() {
           clickEventForward: true,
           useMouseEvents: true,
           showPageCorners: false,
-          // 關鍵：StPageFlip 在 portrait 模式下若開啟 disableFlipByClick: true，
-          // 會因內部 isPointOnCorners({x:10,y:1}) 座標換算瑕疵導致 flipPrev() 與往回切換頁面失效！
-          // 因此這裡設為 false，並改由下方 userStop 與 onMouseDown 攔截單擊翻頁。
           disableFlipByClick: false,
           usePortrait: true,
           flippingTime: 550,
-          startPage: 0,
+          // PAGE_ORDER = ['discover', 'trips', 'plan', 'tools']，預設開啟 Index 1 ('trips')
+          startPage: 1,
         });
 
         const pages = bookContainerRef.current.querySelectorAll('.tabi-book-page');
@@ -485,7 +656,6 @@ export default function App() {
             }
           };
 
-          // 深度攔截 StPageFlip 內部 UI 事件 (.stf__block)，徹底解決點擊或捲動時誤觸翻頁的問題
           const ui = (pf as any).ui;
           if (ui && typeof ui.removeHandlers === 'function' && typeof ui.setHandlers === 'function') {
             ui.removeHandlers();
@@ -541,14 +711,15 @@ export default function App() {
     };
   }, []);
 
-  // 切換書頁輔助函式 (底部導覽列始終可直接選擇並觸發 3D 翻頁，包含防卡死保護)
+  // 切換書頁輔助函式：
+  // PAGE_ORDER = ['discover', 'trips', 'plan', 'tools'] 與底部導覽列完全一致！
+  // 相鄰頁面 (例如 Discover <-> Trips) 直接 3D 翻頁；跨多頁切換時直接 turnToPage(targetIdx)，絕不閃過中間頁 (如 Plan)
   const navigateToTab = (tab: TabKey) => {
     setActiveTab(tab);
     const targetIdx = PAGE_ORDER.indexOf(tab);
     const pf = pageFlipRef.current;
     if (targetIdx !== -1 && pf) {
       try {
-        // 1. 若前一次翻頁動畫還在進行中，先立即完成它，避免 StPageFlip 內部 currentSpreadIndex 錯位
         const render = (pf as any).getRender?.();
         if (render && render.animation) {
           render.finishAnimation();
@@ -560,33 +731,19 @@ export default function App() {
 
         const currentIdx = pf.getCurrentPageIndex();
         if (currentIdx !== targetIdx) {
-          // 若跨多頁切換，先將鄰近頁同步至底層再執行 3D 翻頁動畫
-          if (Math.abs(targetIdx - currentIdx) > 1) {
-            pf.turnToPage(targetIdx > currentIdx ? targetIdx - 1 : targetIdx + 1);
-          }
-          if (targetIdx > currentIdx) {
-            pf.flipNext();
+          if (Math.abs(targetIdx - currentIdx) === 1) {
+            if (targetIdx > currentIdx) {
+              pf.flipNext();
+            } else {
+              pf.flipPrev();
+            }
+            const stateAfter = flipCtrl?.getState?.();
+            if (stateAfter !== 'flipping') {
+              pf.turnToPage(targetIdx);
+            }
           } else {
-            pf.flipPrev();
-          }
-
-          // 2. 雙重保險：若翻頁動畫未成功啟動，立即使用 turnToPage 切換到位
-          const stateAfter = flipCtrl?.getState?.();
-          if (stateAfter !== 'flipping') {
+            // 跨頁切換直接定位至目標頁，避免先閃過中間頁面
             pf.turnToPage(targetIdx);
-          } else {
-            setTimeout(() => {
-              try {
-                if (pageFlipRef.current && pageFlipRef.current.getCurrentPageIndex() !== targetIdx) {
-                  const r = (pageFlipRef.current as any).getRender?.();
-                  if (r && !r.animation) {
-                    pageFlipRef.current.turnToPage(targetIdx);
-                  }
-                }
-              } catch {
-                // ignore
-              }
-            }, 600);
           }
         }
       } catch {
@@ -596,36 +753,6 @@ export default function App() {
           // ignore
         }
       }
-    }
-  };
-
-  const flipPrevPage = () => {
-    const pf = pageFlipRef.current;
-    if (!pf) return;
-    try {
-      const render = (pf as any).getRender?.();
-      if (render && render.animation) render.finishAnimation();
-      const curr = pf.getCurrentPageIndex();
-      if (curr > 0) {
-        navigateToTab(PAGE_ORDER[curr - 1]);
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  const flipNextPage = () => {
-    const pf = pageFlipRef.current;
-    if (!pf) return;
-    try {
-      const render = (pf as any).getRender?.();
-      if (render && render.animation) render.finishAnimation();
-      const curr = pf.getCurrentPageIndex();
-      if (curr < PAGE_ORDER.length - 1) {
-        navigateToTab(PAGE_ORDER[curr + 1]);
-      }
-    } catch {
-      // ignore
     }
   };
 
@@ -779,13 +906,68 @@ export default function App() {
     return map;
   }, [state.expenses]);
 
+  // 📊 Recharts 圓餅圖資料 (購物、飲食、交通、手信佔比)
+  const expensePieData = useMemo(() => {
+    const colorMap: Record<ExpenseCategoryKey, string> = {
+      shopping: '#DF6437',
+      dining: '#1A5D42',
+      transport: '#2563EB',
+      gifts: '#D97706',
+    };
+    return EXPENSE_CATEGORIES.map((cat) => {
+      const val = categoryTotals[cat.key] || 0;
+      const pct = totalSpentJPY > 0 ? Math.round((val / totalSpentJPY) * 100) : 0;
+      return {
+        key: cat.key,
+        name: cat.zhTitle.split(' ')[0],
+        fullTitle: cat.zhTitle,
+        value: val,
+        percent: pct,
+        color: colorMap[cat.key],
+      };
+    });
+  }, [categoryTotals, totalSpentJPY]);
+
   const latestExpense = useMemo(() => {
-    const matchaItem = state.expenses.find((e) => e.id === 'exp-4');
-    if (state.expenses.length > 0 && state.expenses[state.expenses.length - 1].id !== 'exp-6') {
+    if (state.expenses.length > 0) {
       return state.expenses[state.expenses.length - 1];
     }
-    return matchaItem || state.expenses[0] || null;
+    return null;
   }, [state.expenses]);
+
+  // 🌸 根據目前「目的地」與「出發日期」自動計算：
+  // 1) Trips 圖片下方的季節/氣候提示列
+  // 2) Discover 私房景點與美食靈感清單
+  // 3) Tools 今日最新小確幸目的地推薦清單
+  const seasonalBanner = useMemo(
+    () => getDynamicSeasonalBanner(state.trip.destinationTitle, state.trip.startDate),
+    [state.trip.destinationTitle, state.trip.startDate]
+  );
+
+  const curatedGemData = useMemo(
+    () => getCuratedGemsForDestination(state.trip.destinationTitle, state.destinations),
+    [state.trip.destinationTitle, state.destinations]
+  );
+
+  const filteredGems = useMemo(() => {
+    if (gemCategoryFilter === 'all') return curatedGemData.gems;
+    return curatedGemData.gems.filter((g) => g.category === gemCategoryFilter);
+  }, [curatedGemData.gems, gemCategoryFilter]);
+
+  const GEM_PAGE_SIZE = 4;
+  const totalGemBatches = Math.max(1, Math.ceil(filteredGems.length / GEM_PAGE_SIZE));
+  const safeGemBatchIndex = gemBatchIndex % totalGemBatches;
+  const visibleGems = useMemo(() => {
+    const start = safeGemBatchIndex * GEM_PAGE_SIZE;
+    return filteredGems.slice(start, start + GEM_PAGE_SIZE);
+  }, [filteredGems, safeGemBatchIndex]);
+
+  const destinationTreats = useMemo(
+    () => getTreatsForDestination(state.trip.destinationTitle, state.destinations),
+    [state.trip.destinationTitle, state.destinations]
+  );
+  const currentRecommendedTreat =
+    destinationTreats[treatIndex % Math.max(1, destinationTreats.length)] || destinationTreats[0];
 
   // --- 互動功能 Handlers ---
   const openGoogleMaps = (query: string) => {
@@ -795,6 +977,66 @@ export default function App() {
       window.location.href = url;
     } else {
       window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  // --- 🖼️ 輸入目的地後自動找尋合適的 Hero 主視覺圖片 ---
+  const handleAutoFindTripHeroPhoto = async (destTitleOverride?: string) => {
+    const query = (destTitleOverride ?? state.trip.destinationTitle).trim();
+    if (!query || isSearchingHeroPhoto) return;
+    setIsSearchingHeroPhoto(true);
+    try {
+      const res = await findDestinationPhoto(query, query);
+      setState((prev) => ({
+        ...prev,
+        trip: {
+          ...prev.trip,
+          heroPhotoUrl: res.photoUrl,
+        },
+      }));
+      showToast(`🖼️ 已根據目的地「${query}」自動換上合適風景圖片！`);
+    } catch {
+      showToast('⚠️ 暫時無法取得線上圖片，已保留目前主視覺');
+    } finally {
+      setIsSearchingHeroPhoto(false);
+    }
+  };
+
+  // --- 🏨 輸入飯店名稱後自動查詢地址（單一結果直接填入，多個分館跳出選擇卡片） ---
+  const handleSearchHotelAddress = async (hotelQueryOverride?: string) => {
+    const query = (hotelQueryOverride ?? state.stay.hotelName).trim();
+    if (!query || query.length < 2) {
+      showToast('⚠️ 請先輸入飯店名稱（至少 2 個字）');
+      return;
+    }
+    setIsSearchingHotelAddress(true);
+    try {
+      const results = await searchHotelCandidates(query, state.trip.destinationTitle);
+      if (results.length === 1) {
+        const matched = results[0];
+        setState((prev) => ({
+          ...prev,
+          stay: {
+            ...prev.stay,
+            hotelName: matched.name || prev.stay.hotelName,
+            address: matched.address,
+            subTitle: matched.branchNote || prev.stay.subTitle,
+          },
+        }));
+        setHotelCandidates([]);
+        showToast(`✅ 已自動填寫「${matched.name}」的地址！`);
+      } else if (results.length > 1) {
+        setHotelCandidates(results);
+        showToast(`🏨 發現 ${results.length} 個相關分館/地址，請點選下方卡片套用！`);
+      } else {
+        setHotelCandidates([]);
+        showToast('ℹ️ 找不到相符的飯店地址，請嘗試加上城市名稱（如：APA 京都）或手動輸入');
+      }
+    } catch {
+      setHotelCandidates([]);
+      showToast('⚠️ 搜尋飯店地址時發生問題，請手動填寫');
+    } finally {
+      setIsSearchingHotelAddress(false);
     }
   };
 
@@ -949,67 +1191,172 @@ export default function App() {
     }
   };
 
-  // --- 📥 匯入另一個 PWA 的地點資料 (支援「文字.txt」Google Places JSON 格式) ---
+  // --- 📥 1:1 專屬對接 Amazing Location PWA 匯入解析器：完整保留 customName, customCity, customArea, customTags, addressComponents ---
   const parseAndImportPlacesArray = (rawArray: any[]) => {
     if (!Array.isArray(rawArray) || rawArray.length === 0) {
       showToast('⚠️ 找不到有效的地點陣列資料');
       return false;
     }
 
-    const existingNames = new Set(
-      state.destinations.map((d) => (d.customName || d.name).trim())
-    );
-    const newDests: SavedDestination[] = [];
+    let addedCount = 0;
+    let updatedCount = 0;
 
-    rawArray.forEach((p: any, idx: number) => {
-      const displayName =
-        p.customName ||
-        p.displayName?.text ||
-        (typeof p.displayName === 'string' ? p.displayName : '') ||
-        p.name ||
-        `匯入地點 #${idx + 1}`;
+    setState((prev) => {
+      const nextDestinations = [...prev.destinations];
+      const existingById = new Map<string, number>();
+      const existingByName = new Map<string, number>();
 
-      if (existingNames.has(displayName.trim())) return;
-      existingNames.add(displayName.trim());
-
-      const lat =
-        p.location?.latitude ?? p.location?.lat ?? p.geometry?.location?.lat;
-      const lng =
-        p.location?.longitude ?? p.location?.lng ?? p.geometry?.location?.lng;
-
-      newDests.push({
-        id: p.id || `import-${Date.now()}-${idx}`,
-        name: displayName,
-        customName: p.customName || undefined,
-        formattedAddress: p.formattedAddress || p.formatted_address || '',
-        nationalPhoneNumber: p.nationalPhoneNumber || p.formatted_phone_number || '',
-        rating: typeof p.rating === 'number' ? p.rating : undefined,
-        userRatingCount:
-          typeof p.userRatingCount === 'number'
-            ? p.userRatingCount
-            : p.user_ratings_total,
-        location:
-          typeof lat === 'number' && typeof lng === 'number'
-            ? { lat, lng }
-            : undefined,
-        openNow: p.regularOpeningHours?.openNow,
-        weekdayDescriptions: Array.isArray(p.regularOpeningHours?.weekdayDescriptions)
-          ? p.regularOpeningHours.weekdayDescriptions
-          : undefined,
-        scheduled: null,
+      nextDestinations.forEach((d, idx) => {
+        if (d.id) existingById.set(d.id, idx);
+        existingByName.set((d.customName || d.name).trim().toLowerCase(), idx);
+        existingByName.set(d.name.trim().toLowerCase(), idx);
       });
+
+      rawArray.forEach((rawItem: any, idx: number) => {
+        const importedDest = convertAmazingLocationItem(rawItem, idx);
+        if (!importedDest) return;
+
+        const dispKey = (importedDest.customName || importedDest.name).trim().toLowerCase();
+        const matchIdx =
+          (importedDest.id ? existingById.get(importedDest.id) : undefined) ??
+          existingByName.get(dispKey) ??
+          existingByName.get(importedDest.name.trim().toLowerCase());
+
+        if (matchIdx !== undefined && nextDestinations[matchIdx]) {
+          // 若清單中已有同 ID 或同名地點，無損補齊/更新 Amazing Location 的 customName, customCity, customArea, customTags 等資訊
+          const prevItem = nextDestinations[matchIdx];
+          nextDestinations[matchIdx] = {
+            ...prevItem,
+            ...importedDest,
+            id: prevItem.id,
+            customName: importedDest.customName || prevItem.customName,
+            customCity: importedDest.customCity || prevItem.customCity,
+            customArea: importedDest.customArea || prevItem.customArea,
+            customTags:
+              importedDest.customTags && importedDest.customTags.length > 0
+                ? importedDest.customTags
+                : prevItem.customTags,
+            scheduled: importedDest.scheduled || prevItem.scheduled,
+            photoUrl: importedDest.photoUrl || prevItem.photoUrl,
+          };
+          updatedCount++;
+        } else {
+          nextDestinations.unshift(importedDest);
+          existingById.set(importedDest.id, 0);
+          existingByName.set(dispKey, 0);
+          addedCount++;
+        }
+      });
+
+      return {
+        ...prev,
+        destinations: nextDestinations,
+      };
     });
 
-    if (newDests.length > 0) {
-      setState((prev) => ({
-        ...prev,
-        destinations: [...newDests, ...prev.destinations],
-      }));
-      showToast(`🎉 成功匯入 ${newDests.length} 個地點至目的地清單！`);
-    } else {
-      showToast('ℹ️ 所有匯入的地點都已在清單中囉！');
+    if (addedCount > 0 || updatedCount > 0) {
+      setPlanDestPoolExpanded(true);
+      showToast(
+        `🎉 已從 Amazing Location 成功匯入 ${addedCount} 個新景點${
+          updatedCount > 0 ? `（並同步更新 ${updatedCount} 個現有景點的分類與標籤）` : ''
+        }！`
+      );
+      return true;
     }
-    return true;
+    showToast('ℹ️ 找不到可匯入的新地點資料');
+    return false;
+  };
+
+  // 萬用文字/JSON 匯入入口：自動辨識任何另一款 PWA 匯出的 JSON 結構或純文字清單
+  const handleUniversalImport = (rawText: string): boolean => {
+    const trimmed = rawText.trim();
+    if (!trimmed) {
+      showToast('⚠️ 匯入內容為空，請貼上資料或選擇檔案');
+      return false;
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      // 1. 直接為陣列 [...] (例如 文字.txt)
+      if (Array.isArray(parsed)) {
+        return parseAndImportPlacesArray(parsed);
+      }
+
+      if (parsed && typeof parsed === 'object') {
+        // 2. 完整「去旅行啦」備份檔 (含 trip, outbound, destinations, expenses)
+        if (parsed.trip && parsed.outbound && Array.isArray(parsed.destinations)) {
+          setState((prev) => ({ ...prev, ...parsed }));
+          showToast('🎉 已還原完整「去旅行啦」行程與目的地備份！');
+          return true;
+        }
+
+        // 3. 常見外部 Location / Travel PWA 匯出包裝物件：
+        // 例如 { places: [...] }, { locations: [...] }, { destinations: [...] }, { items: [...] }, { favorites: [...] }, { savedPlaces: [...] }, { data: [...] }
+        const candidateArray =
+          parsed.places ||
+          parsed.locations ||
+          parsed.destinations ||
+          parsed.items ||
+          parsed.list ||
+          parsed.favorites ||
+          parsed.savedPlaces ||
+          parsed.bookmarks ||
+          parsed.spots ||
+          parsed.itinerary ||
+          parsed.data ||
+          parsed.results;
+
+        if (Array.isArray(candidateArray)) {
+          // 若同時帶有舊版 inputs (startDate, endDate, hotelName) 也一併同步
+          if (parsed.inputs && typeof parsed.inputs === 'object') {
+            setState((prev) => ({
+              ...prev,
+              trip: {
+                ...prev.trip,
+                startDate: parsed.inputs.startDate || prev.trip.startDate,
+                endDate: parsed.inputs.endDate || prev.trip.endDate,
+              },
+              stay: {
+                ...prev.stay,
+                hotelName: parsed.inputs.hotelName || prev.stay.hotelName,
+              },
+            }));
+          }
+          return parseAndImportPlacesArray(candidateArray);
+        }
+
+        // 4. 單一 Google Place 或地點物件 { id, displayName / name, formattedAddress, ... }
+        if (parsed.displayName || parsed.name || parsed.formattedAddress || parsed.title) {
+          return parseAndImportPlacesArray([parsed]);
+        }
+      }
+    } catch {
+      // 非 JSON 格式：嘗試解析純文字行（例如從另一款 PWA 複製的文字清單，每行或逗號分隔）
+      const lines = trimmed
+        .split(/\r?\n/)
+        .map((line) =>
+          line
+            .replace(/^[\d一二三四五六七八九十]+[.)、:：\-\s]+/, '')
+            .replace(/^[•*+\-📍🗓️✅]\s*/, '')
+            .trim()
+        )
+        .filter((line) => line.length >= 2 && !line.startsWith('{') && !line.startsWith('['));
+
+      if (lines.length > 0) {
+        const textPlaces = lines.map((line, idx) => {
+          const parts = line.split(/\s+[-|｜—]\s+/);
+          return {
+            id: `import-line-${Date.now()}-${idx}`,
+            name: parts[0].trim(),
+            formattedAddress: parts.slice(1).join(' ').trim() || undefined,
+          };
+        });
+        return parseAndImportPlacesArray(textPlaces);
+      }
+    }
+
+    showToast('⚠️ 無法辨識此匯入格式，請確認內容或提供另一 PWA 的匯出範例');
+    return false;
   };
 
   const handleImportFromClipboard = async () => {
@@ -1019,21 +1366,35 @@ export default function App() {
         setShowImportJsonModal(true);
         return;
       }
-      const parsed = JSON.parse(text);
-      if (Array.isArray(parsed)) {
-        parseAndImportPlacesArray(parsed);
-      } else if (parsed.destinations && Array.isArray(parsed.destinations)) {
-        setState((prev) => ({ ...prev, ...parsed }));
-        showToast('🎉 已還原完整「去旅行啦」行程備份！');
-      } else {
+      const ok = handleUniversalImport(text);
+      if (!ok) {
         setImportJsonText(text);
         setShowImportJsonModal(true);
       }
     } catch {
-      // 若瀏覽器權限阻擋剪貼簿或非 JSON，開啟手動貼上/上傳「文字.txt」視窗
+      // 手機 iOS Safari / Android PWA 跨 App 切換時若權限阻擋直接讀取剪貼簿，自動開啟專屬快速貼上視窗
       setShowImportJsonModal(true);
     }
   };
+
+  // 支援 URL Deep Link 自動匯入 (?importLocation=... 或 ?places=...)
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const rawImport = params.get('importLocation') || params.get('places');
+      if (rawImport) {
+        const decoded = decodeURIComponent(rawImport);
+        const ok = handleUniversalImport(decoded);
+        if (ok) {
+          const cleanUrl = window.location.pathname;
+          window.history.replaceState({}, document.title, cleanUrl);
+        }
+      }
+    } catch {
+      // ignore invalid URL params
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // --- 📅 開啟「安排與預算」排程視窗 (將目的地排入指定日期與時間) ---
   const openScheduleModal = (dest: SavedDestination) => {
@@ -1097,6 +1458,14 @@ export default function App() {
         (a) => a.sourceDestId === scheduleModalDest.id || a.location === dispTitle || a.title === dispTitle
       );
 
+      const areaPrefix = [scheduleModalDest.customCity, scheduleModalDest.customArea]
+        .filter(Boolean)
+        .join(' · ');
+      const tagsNote =
+        scheduleModalDest.customTags && scheduleModalDest.customTags.length > 0
+          ? `標籤：${scheduleModalDest.customTags.map((t) => `#${t}`).join(' ')}｜`
+          : '';
+
       const newActivityObj: PlanActivity = {
         id: existingActIdx >= 0 ? prev.activities[existingActIdx].id : `act-${Date.now()}`,
         sourceDestId: scheduleModalDest.id,
@@ -1113,18 +1482,29 @@ export default function App() {
             : 'blue',
         kicker: `${scheduleForm.start} - ${scheduleForm.end}`,
         duration: `${transportEmoji}${scheduleForm.cost ? ` · ¥${Number(scheduleForm.cost).toLocaleString()}` : ''}`,
-        badgeText: scheduleModalDest.rating ? `⭐ ${scheduleModalDest.rating}` : '📍 已排程',
+        badgeText:
+          scheduleModalDest.customTags && scheduleModalDest.customTags.length > 0
+            ? `#${scheduleModalDest.customTags[0]}${scheduleModalDest.rating ? ` ⭐${scheduleModalDest.rating}` : ''}`
+            : scheduleModalDest.rating
+            ? `⭐ ${scheduleModalDest.rating}`
+            : '📍 已排程',
         title: dispTitle,
-        location: scheduleModalDest.formattedAddress || dispTitle,
+        location: areaPrefix
+          ? `${areaPrefix}｜${scheduleModalDest.formattedAddress || dispTitle}`
+          : scheduleModalDest.formattedAddress || dispTitle,
         note:
-          scheduleModalDest.weekdayDescriptions?.[0] ||
-          `交通方式：${scheduleForm.transport}｜預算：${scheduleForm.cost || '0'}`,
+          `${tagsNote}${
+            scheduleModalDest.weekdayDescriptions?.[0] ||
+            `交通方式：${scheduleForm.transport}｜預估花費：¥${scheduleForm.cost || '0'}`
+          }`,
         photoUrl:
           scheduleModalDest.photoUrl ||
           (existingActIdx >= 0
             ? prev.activities[existingActIdx].photoUrl
             : '/assets/tabi/plan_market.png'),
-        photoBadge: scheduleModalDest.photoBadge || '精選行程 ✨',
+        photoBadge:
+          scheduleModalDest.photoBadge ||
+          (areaPrefix ? `📍 ${areaPrefix}` : '精選行程 ✨'),
         cost: Number(scheduleForm.cost) || 0,
         lat: scheduleModalDest.location?.lat,
         lng: scheduleModalDest.location?.lng,
@@ -1182,17 +1562,40 @@ export default function App() {
     showToast(`🗑️ 已從目的地清單刪除「${dispTitle}」`);
   };
 
-  // 編輯景點名稱
+  // 開啟 4 欄位編輯地點視窗 (1:1 對應 Amazing Location 的編輯視窗)
+  const openEditDestinationModal = (dest: SavedDestination) => {
+    setRenameModalDest(dest);
+    setRenameInputVal(dest.customName || dest.name);
+    setEditDestCityVal(dest.customCity || '');
+    setEditDestAreaVal(dest.customArea || '');
+    setEditDestTagsVal(dest.customTags ? dest.customTags.join(', ') : '');
+  };
+
+  // 儲存地點名稱、城市、區域與自訂標籤
   const handleConfirmRename = (e: React.FormEvent) => {
     e.preventDefault();
     if (!renameModalDest || !renameInputVal.trim()) return;
     const newName = renameInputVal.trim();
+    const newCity = editDestCityVal.trim() || undefined;
+    const newArea = editDestAreaVal.trim() || undefined;
+    const newTags = editDestTagsVal
+      .split(/[,，]/)
+      .map((t) => t.trim())
+      .filter(Boolean);
     const oldName = renameModalDest.customName || renameModalDest.name;
 
     setState((prev) => ({
       ...prev,
       destinations: prev.destinations.map((d) =>
-        d.id === renameModalDest.id ? { ...d, name: newName, customName: newName } : d
+        d.id === renameModalDest.id
+          ? {
+              ...d,
+              customName: newName,
+              customCity: newCity,
+              customArea: newArea,
+              customTags: newTags.length > 0 ? newTags : undefined,
+            }
+          : d
       ),
       activities: prev.activities.map((a) =>
         a.sourceDestId === renameModalDest.id || a.title === oldName
@@ -1201,7 +1604,7 @@ export default function App() {
       ),
     }));
     setRenameModalDest(null);
-    showToast(`✏️ 已更新名稱為「${newName}」`);
+    showToast(`✏️ 已更新「${newName}」的景點名稱與區域標籤！`);
   };
 
   // --- 🖼️ 一鍵根據目的地自動找尋/生成相關行程圖片 ---
@@ -1545,6 +1948,87 @@ export default function App() {
     showToast(`✅ 已新增支出「${newItem.title}」(¥${amountInJPY.toLocaleString()})`);
   };
 
+  // 開啟「修改消費紀錄」Modal（自動解析標題尾端的「× 2」數量與單價，方便一鍵加減數量或直接改價錢）
+  const openEditExpenseModal = (item: ExpenseItem) => {
+    const qtyMatch = item.title.match(/^(.*?)\s*[×xX*]\s*(\d+)\s*$/);
+    const parsedQty = qtyMatch ? Math.max(1, parseInt(qtyMatch[2], 10)) : 1;
+    const cleanBaseTitle = qtyMatch ? qtyMatch[1].trim() : item.title.trim();
+    const origAmt = Number(item.originalAmount || item.amountJPY) || 0;
+    const unitAmt = parsedQty > 0 ? origAmt / parsedQty : origAmt;
+
+    setEditingExpense(item);
+    setEditExpForm({
+      baseTitle: cleanBaseTitle,
+      quantity: parsedQty,
+      unitAmount: unitAmt,
+      amount: String(origAmt),
+      currency: item.originalCurrency || 'JPY',
+      category: item.category,
+      shopOrNote: item.shopOrNote || '',
+    });
+  };
+
+  // 修改消費時調整數量（自動依單價同步換算總金額，亦可手動覆寫金額）
+  const handleEditExpenseQtyChange = (delta: number) => {
+    setEditExpForm((prev) => {
+      const nextQty = Math.max(1, prev.quantity + delta);
+      const currentTotal = Number(prev.amount) || 0;
+      const effectiveUnit =
+        prev.unitAmount > 0
+          ? prev.unitAmount
+          : prev.quantity > 0
+          ? currentTotal / prev.quantity
+          : currentTotal;
+      const nextAmount =
+        prev.currency === 'JPY' || prev.currency === 'KRW'
+          ? Math.round(effectiveUnit * nextQty)
+          : Number((effectiveUnit * nextQty).toFixed(2));
+      return {
+        ...prev,
+        quantity: nextQty,
+        unitAmount: effectiveUnit,
+        amount: String(nextAmount),
+      };
+    });
+  };
+
+  // 儲存修改後的消費紀錄
+  const handleEditExpenseSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingExpense) return;
+    const rawAmt = Number(editExpForm.amount);
+    if (!editExpForm.baseTitle.trim() || isNaN(rawAmt) || rawAmt < 0) {
+      showToast('⚠️ 請輸入有效的消費項目名稱與金額');
+      return;
+    }
+
+    const finalTitle =
+      editExpForm.quantity > 1
+        ? `${editExpForm.baseTitle.trim()} × ${editExpForm.quantity}`
+        : editExpForm.baseTitle.trim();
+    const amountInJPY = Math.round(convertAmount(rawAmt, editExpForm.currency, 'JPY'));
+
+    setState((prev) => ({
+      ...prev,
+      expenses: prev.expenses.map((item) =>
+        item.id === editingExpense.id
+          ? {
+              ...item,
+              title: finalTitle,
+              shopOrNote: editExpForm.shopOrNote.trim() || '旅途消費',
+              amountJPY: amountInJPY,
+              originalAmount: rawAmt,
+              originalCurrency: editExpForm.currency,
+              category: editExpForm.category,
+            }
+          : item
+      ),
+    }));
+
+    setEditingExpense(null);
+    showToast(`✏️ 已更新「${finalTitle}」為 ¥${amountInJPY.toLocaleString()}！`);
+  };
+
   const handleDeleteExpense = (id: string) => {
     setState((prev) => ({
       ...prev,
@@ -1619,9 +2103,9 @@ export default function App() {
       <div className="flex items-center gap-2">
         <div className="w-9 h-9 rounded-xl bg-white shadow-xs border border-[#E2ECE7] flex items-center justify-center overflow-hidden shrink-0">
           <img
-            src="/assets/tabi/logo.png"
+            src="/assets/aistudio/amazing-travel-icon_eef69a7f.png"
             alt="去旅行啦 Logo"
-            className="w-7 h-7 object-contain"
+            className="w-8 h-8 object-contain"
             referrerPolicy="no-referrer"
           />
         </div>
@@ -1659,311 +2143,334 @@ export default function App() {
         >
           <Bell className="w-[18px] h-[18px] stroke-[2.2]" />
         </button>
-        <button
-          type="button"
-          onClick={() => setShowTripModal(true)}
-          className="w-9 h-9 rounded-full overflow-hidden ring-2 ring-[#CBE8DA] shadow-xs shrink-0"
-        >
-          <img
-            src="/assets/tabi/avatar.png"
-            alt="User Avatar"
-            className="w-full h-full object-cover"
-            referrerPolicy="no-referrer"
-          />
-        </button>
       </div>
     </div>
   );
 
-  // 共用「📋 目的地清單 (Destination Pool)」渲染區塊 (保留原本功能：手動輸入、從另一個 PWA 匯入 文字.txt 格式、展開編排日期與預算)
-  const renderDestinationPoolSection = () => (
-    <div
-      className="bg-white rounded-[26px] p-4 shadow-sm border border-[#DCEAE2] space-y-3"
-      data-no-flip="true"
-    >
-      <div className="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={() => setPlanDestPoolExpanded((prev) => !prev)}
-          className="flex items-center gap-2 text-left"
-        >
-          <span className="text-[16px] font-extrabold text-[#14241D]">
-            📋 目的地清單 ({state.destinations.length})
-          </span>
-          <span className="text-xs text-[#1A5D42] font-bold">
-            {planDestPoolExpanded ? '▼ 收起' : '▲ 展開編排'}
-          </span>
-        </button>
+  // 共用「📋 目的地清單 (Destination Pool)」渲染區塊 (1:1 無縫對接 Amazing Location PWA：支援城市區域篩選、#自訂標籤顯示、一鍵剪貼簿/貼上匯入與日期編排)
+  const renderDestinationPoolSection = () => {
+    const uniqueCities = Array.from(
+      new Set(
+        state.destinations
+          .map((d) => d.customCity)
+          .filter((c): c is string => Boolean(c && c.trim()))
+      )
+    );
 
-        <div className="flex items-center gap-1.5">
+    const filteredDestinations =
+      destCityFilter === '全部'
+        ? state.destinations
+        : state.destinations.filter((d) => d.customCity === destCityFilter);
+
+    return (
+      <div
+        className="bg-white rounded-[26px] p-4 shadow-sm border border-[#DCEAE2] space-y-3"
+        data-no-flip="true"
+      >
+        <div className="flex items-center justify-between gap-2">
           <button
             type="button"
-            onClick={handleImportFromClipboard}
-            className="px-2.5 py-1.5 rounded-xl bg-[#EDE5F8] hover:bg-[#dfd2f3] text-[#5B2E91] text-[11px] font-extrabold flex items-center gap-1 transition"
+            onClick={() => setPlanDestPoolExpanded((prev) => !prev)}
+            className="flex items-center gap-2 text-left"
           >
-            <span>📥</span>
-            <span>匯入 Location</span>
+            <span className="text-[16px] font-extrabold text-[#14241D]">
+              📋 目的地清單 ({state.destinations.length})
+            </span>
+            <span className="text-xs text-[#1A5D42] font-bold">
+              {planDestPoolExpanded ? '▼ 收起' : '▲ 展開編排'}
+            </span>
           </button>
-          <button
-            type="button"
-            onClick={() => setShowImportJsonModal(true)}
-            className="px-2.5 py-1.5 rounded-xl bg-[#FADBD0] hover:bg-[#f4c7b7] text-[#A83815] text-[11px] font-extrabold flex items-center gap-1 transition"
-          >
-            <FileText className="w-3 h-3" />
-            <span>文字.txt</span>
-          </button>
-        </div>
-      </div>
 
-      {planDestPoolExpanded && (
-        <div className="space-y-3 pt-1 border-t border-[#EBF3EE]">
-          {/* 🤖 AI 行程優化快捷橫幅按鈕 (一鍵分析目的地清單、排入未安排景點與最佳化訪問順序) */}
-          <div className="p-2.5 rounded-2xl bg-gradient-to-r from-[#E3F3EB] via-[#EAF5F0] to-[#FCE9E1] border border-[#C6E3D4] flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="text-[12px] font-extrabold text-[#143D2B] flex items-center gap-1">
-                <Wand2 className="w-3.5 h-3.5 text-[#C24726] shrink-0" />
-                <span>AI 智慧行程優化</span>
-                {state.destinations.filter((d) => !d.scheduled).length > 0 && (
-                  <span className="px-1.5 py-0.2 rounded-full bg-[#C24726] text-white text-[9.5px] font-black">
-                    {state.destinations.filter((d) => !d.scheduled).length} 待排時段
-                  </span>
-                )}
-              </div>
-              <p className="text-[10.5px] text-[#4E685C] truncate mt-0.5">
-                自動建議順路訪問順序，並為未安排景點配置最佳時段
-              </p>
-            </div>
+          <div className="flex items-center gap-1.5">
+            {state.destinations.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setState((prev) => ({
+                    ...prev,
+                    destinations: [],
+                    activities: [],
+                  }));
+                  setDestCityFilter('全部');
+                  showToast('🗑️ 已清空所有目的地與排程（重開 App 不會再復原預設景點）');
+                }}
+                className="px-2 py-1.5 rounded-xl bg-[#FBE4DF] hover:bg-[#f5cfc6] text-[#B53D1B] text-[11px] font-extrabold flex items-center gap-1 transition"
+                title="清空全部目的地"
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>清空</span>
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => handleOpenAIOptimizer('fill_and_reorder')}
-              className="px-3 py-1.5 rounded-xl bg-[#1A5D42] hover:bg-[#124430] text-white text-[11px] font-extrabold shrink-0 shadow-2xs flex items-center gap-1 transition"
+              onClick={handleImportFromClipboard}
+              className="px-2.5 py-1.5 rounded-xl bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[11px] font-extrabold flex items-center gap-1 shadow-2xs transition"
+              title="從 Amazing Location 匯入景點資料"
             >
-              <Sparkles className="w-3 h-3" />
-              <span>AI 行程優化</span>
+              <span>📥</span>
+              <span>匯入 Location 資料</span>
             </button>
-          </div>
-
-          {/* 手動輸入新增目的地表單 */}
-          <form onSubmit={handleManualAddDestinations} className="flex gap-2">
-            <input
-              type="text"
-              value={manualDestInput}
-              onChange={(e) => setManualDestInput(e.target.value)}
-              disabled={isSearchingPlace}
-              placeholder="手動輸入地點 (多個用逗號分隔，如：金閣寺, 鴨川)..."
-              className="flex-1 px-3.5 py-2.5 rounded-xl bg-[#F4FAF6] border border-[#CFE3D8] text-xs font-bold text-[#14241D] placeholder:text-[#758C81] focus:outline-none focus:border-[#1A5D42] focus:bg-white"
-            />
             <button
-              type="submit"
-              disabled={isSearchingPlace}
-              className="px-4 py-2.5 rounded-xl bg-[#1A5D42] hover:bg-[#134631] text-white text-xs font-extrabold shrink-0 transition"
+              type="button"
+              onClick={() => setShowImportJsonModal(true)}
+              className="px-2 py-1.5 rounded-xl bg-[#FADBD0] hover:bg-[#f4c7b7] text-[#A83815] text-[11px] font-extrabold flex items-center gap-1 transition"
+              title="貼上 JSON 或上傳檔案"
             >
-              {isSearchingPlace ? '搜尋中...' : '＋ 新增'}
+              <FileText className="w-3 h-3" />
+              <span>貼上</span>
             </button>
-          </form>
-
-          {/* 目的地清單卡片列表 */}
-          <div className="space-y-2 max-h-[300px] overflow-y-auto pr-0.5 tabi-scroll">
-            {state.destinations.map((dest) => {
-              const isExpanded = expandedDestId === dest.id;
-              const dispName = dest.customName || dest.name;
-              const scheduledDayObj = dest.scheduled?.date
-                ? tripDays.find((d) => d.iso === dest.scheduled?.date)
-                : null;
-
-              return (
-                <div
-                  key={dest.id}
-                  className={`rounded-2xl border transition overflow-hidden ${
-                    dest.scheduled
-                      ? 'bg-[#F3FAF6] border-[#68C39F]'
-                      : 'bg-white border-[#E0ECE5]'
-                  }`}
-                >
-                  <div
-                    onClick={() =>
-                      setExpandedDestId(isExpanded ? null : dest.id)
-                    }
-                    className="p-3 flex items-center justify-between gap-2 cursor-pointer hover:bg-[#EAF4EF]/60 transition"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5">
-                        <h4 className="font-extrabold text-[13.5px] text-[#14241D] truncate">
-                          {dispName}
-                        </h4>
-                        {dest.rating && (
-                          <span className="px-1.5 py-0.2 rounded-md bg-amber-100 text-amber-800 text-[10px] font-extrabold flex items-center gap-0.5 shrink-0">
-                            <Star className="w-2.5 h-2.5 fill-amber-500 text-amber-500" />
-                            {dest.rating}
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[11px] font-bold mt-0.5 flex items-center gap-2">
-                        {dest.scheduled ? (
-                          <span className="text-[#166646]">
-                            📅 已安排：{scheduledDayObj ? `${scheduledDayObj.label} (${scheduledDayObj.zhDisp})` : dest.scheduled.date}{' '}
-                            {dest.scheduled.start}~{dest.scheduled.end} · {dest.scheduled.transport}
-                          </span>
-                        ) : (
-                          <span className="text-[#B85D19]">
-                            ⚠️ 未安排 (點擊展開並排入行程日期)
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openScheduleModal(dest);
-                      }}
-                      className="px-3 py-1.5 rounded-xl bg-[#1A5D42] hover:bg-[#134631] text-white text-[11px] font-extrabold shrink-0 shadow-2xs transition"
-                    >
-                      📅 排程
-                    </button>
-                  </div>
-
-                  {/* 展開詳細資訊與操作列 */}
-                  {isExpanded && (
-                    <div className="px-3 pb-3 pt-2 border-t border-[#E2EFE8] bg-white/90 space-y-2 text-xs">
-                      {dest.formattedAddress && (
-                        <div className="text-[#455E52] flex items-start gap-1.5">
-                          <MapPin className="w-3.5 h-3.5 text-[#C24726] shrink-0 mt-0.5" />
-                          <span>{dest.formattedAddress}</span>
-                        </div>
-                      )}
-                      {dest.nationalPhoneNumber && (
-                        <div className="text-[#455E52] flex items-center gap-1.5">
-                          <Phone className="w-3.5 h-3.5 text-[#1A5D42] shrink-0" />
-                          <span>
-                            {dest.nationalPhoneNumber}
-                            {dest.userRatingCount
-                              ? ` · 共 ${dest.userRatingCount.toLocaleString()} 則評論`
-                              : ''}
-                          </span>
-                        </div>
-                      )}
-                      {dest.weekdayDescriptions && dest.weekdayDescriptions.length > 0 && (
-                        <details className="text-[11px] text-[#5A7066] bg-[#F4FAF6] p-2 rounded-xl">
-                          <summary className="font-bold cursor-pointer text-[#1A5D42]">
-                            🕒 查看營業時間 ({dest.openNow ? '營業中' : '休息中'})
-                          </summary>
-                          <ul className="mt-1 space-y-0.5 pl-2">
-                            {dest.weekdayDescriptions.map((line, i) => (
-                              <li key={i}>{line}</li>
-                            ))}
-                          </ul>
-                        </details>
-                      )}
-
-                      <div className="flex flex-wrap items-center justify-end gap-1.5 pt-1">
-                        <button
-                          type="button"
-                          onClick={() => openGoogleMaps(`${dispName} ${dest.formattedAddress || ''}`)}
-                          className="px-2.5 py-1.5 rounded-xl bg-[#E6F1FA] text-[#1D5B96] font-extrabold text-[11px]"
-                        >
-                          🗺️ 地圖
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRenameModalDest(dest);
-                            setRenameInputVal(dispName);
-                          }}
-                          className="px-2.5 py-1.5 rounded-xl bg-[#EEF4F1] text-[#355245] font-extrabold text-[11px]"
-                        >
-                          ✏️ 編輯名稱
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteDestination(dest)}
-                          className="px-2.5 py-1.5 rounded-xl bg-[#FBE4DF] text-[#B53D1B] font-extrabold text-[11px]"
-                        >
-                          🗑 刪除
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => openScheduleModal(dest)}
-                          className="px-3 py-1.5 rounded-xl bg-[#C24726] text-white font-extrabold text-[11px] shadow-2xs"
-                        >
-                          📅 安排與預算
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
           </div>
         </div>
-      )}
-    </div>
-  );
+
+        {planDestPoolExpanded && (
+          <div className="space-y-3 pt-1 border-t border-[#EBF3EE]">
+            {/* 🤖 AI 行程優化快捷橫幅按鈕 */}
+            <div className="p-2.5 rounded-2xl bg-gradient-to-r from-[#E3F3EB] via-[#EAF5F0] to-[#FCE9E1] border border-[#C6E3D4] flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[12px] font-extrabold text-[#143D2B] flex items-center gap-1">
+                  <Wand2 className="w-3.5 h-3.5 text-[#C24726] shrink-0" />
+                  <span>AI 智慧行程優化</span>
+                  {state.destinations.filter((d) => !d.scheduled).length > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-[#C24726] text-white text-[9.5px] font-black">
+                      {state.destinations.filter((d) => !d.scheduled).length} 待排時段
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10.5px] text-[#4E685C] truncate mt-0.5">
+                  自動建議順路訪問順序，並為未安排景點配置最佳時段
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleOpenAIOptimizer('fill_and_reorder')}
+                className="px-3 py-1.5 rounded-xl bg-[#1A5D42] hover:bg-[#124430] text-white text-[11px] font-extrabold shrink-0 shadow-2xs flex items-center gap-1 transition"
+              >
+                <Sparkles className="w-3 h-3" />
+                <span>AI 行程優化</span>
+              </button>
+            </div>
+
+            {/* 手動輸入新增目的地表單 */}
+            <form onSubmit={handleManualAddDestinations} className="flex gap-2">
+              <input
+                type="text"
+                value={manualDestInput}
+                onChange={(e) => setManualDestInput(e.target.value)}
+                disabled={isSearchingPlace}
+                placeholder="手動輸入地點 (多個用逗號分隔，如：金閣寺, 鴨川)..."
+                className="flex-1 px-3.5 py-2.5 rounded-xl bg-[#F4FAF6] border border-[#CFE3D8] text-xs font-bold text-[#14241D] placeholder:text-[#758C81] focus:outline-none focus:border-[#1A5D42] focus:bg-white"
+              />
+              <button
+                type="submit"
+                disabled={isSearchingPlace}
+                className="px-4 py-2.5 rounded-xl bg-[#1A5D42] hover:bg-[#134631] text-white text-xs font-extrabold shrink-0 transition"
+              >
+                {isSearchingPlace ? '搜尋中...' : '＋ 新增'}
+              </button>
+            </form>
+
+            {/* 📍 城市分類篩選列 (當從 Amazing Location 匯入含城市分類的地點時自動顯示) */}
+            {uniqueCities.length > 0 && (
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 tabi-scroll">
+                <button
+                  type="button"
+                  onClick={() => setDestCityFilter('全部')}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold shrink-0 transition ${
+                    destCityFilter === '全部'
+                      ? 'bg-[#1A5D42] text-white'
+                      : 'bg-[#F0F7F3] text-[#456355] hover:bg-[#E1EFE8]'
+                  }`}
+                >
+                  全部 ({state.destinations.length})
+                </button>
+                {uniqueCities.map((city) => {
+                  const count = state.destinations.filter((d) => d.customCity === city).length;
+                  return (
+                    <button
+                      key={city}
+                      type="button"
+                      onClick={() => setDestCityFilter(city)}
+                      className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold shrink-0 transition ${
+                        destCityFilter === city
+                          ? 'bg-[#2563EB] text-white'
+                          : 'bg-[#EFF6FF] text-[#1E40AF] hover:bg-[#DBEAFE]'
+                      }`}
+                    >
+                      📍 {city} ({count})
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* 目的地清單卡片列表 */}
+            <div className="space-y-2 max-h-[320px] overflow-y-auto pr-0.5 tabi-scroll">
+              {filteredDestinations.length === 0 ? (
+                <div className="py-5 px-3 text-center rounded-2xl bg-[#F4FAF6] border border-dashed border-[#CFE3D8] text-xs text-[#5B7368] font-bold">
+                  目前清單沒有符合條件的景點，可點選上方「📥 匯入 Location 資料」從 Amazing Location 匯入！
+                </div>
+              ) : (
+                filteredDestinations.map((dest) => {
+                  const isExpanded = expandedDestId === dest.id;
+                  const dispName = dest.customName || dest.name;
+                  const scheduledDayObj = dest.scheduled?.date
+                    ? tripDays.find((d) => d.iso === dest.scheduled?.date)
+                    : null;
+                  const areaBadge = [dest.customCity, dest.customArea]
+                    .filter(Boolean)
+                    .join(' · ');
+
+                  return (
+                    <div
+                      key={dest.id}
+                      className={`rounded-2xl border transition overflow-hidden ${
+                        dest.scheduled
+                          ? 'bg-[#F3FAF6] border-[#68C39F]'
+                          : 'bg-white border-[#E0ECE5]'
+                      }`}
+                    >
+                      <div
+                        onClick={() =>
+                          setExpandedDestId(isExpanded ? null : dest.id)
+                        }
+                        className="p-3 flex items-center justify-between gap-2 cursor-pointer hover:bg-[#EAF4EF]/60 transition"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h4 className="font-extrabold text-[13.5px] text-[#14241D] truncate">
+                              {dispName}
+                            </h4>
+                            {areaBadge && (
+                              <span className="px-1.5 py-0.5 rounded-md bg-[#EBF3FE] text-[#1D4ED8] text-[10px] font-extrabold shrink-0">
+                                📍 {areaBadge}
+                              </span>
+                            )}
+                            {dest.rating && (
+                              <span className="px-1.5 py-0.2 rounded-md bg-amber-100 text-amber-800 text-[10px] font-extrabold flex items-center gap-0.5 shrink-0">
+                                <Star className="w-2.5 h-2.5 fill-amber-500 text-amber-500" />
+                                {dest.rating}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* 顯示從 Amazing Location 匯入的 #customTags */}
+                          {dest.customTags && dest.customTags.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {dest.customTags.map((tag, idx) => (
+                                <span
+                                  key={idx}
+                                  className="text-[10px] font-extrabold bg-blue-100 text-blue-700 px-1.5 py-0.2 rounded"
+                                >
+                                  #{tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          <div className="text-[11px] font-bold mt-1 flex items-center gap-2">
+                            {dest.scheduled ? (
+                              <span className="text-[#166646]">
+                                📅 已安排：{scheduledDayObj ? `${scheduledDayObj.label} (${scheduledDayObj.zhDisp})` : dest.scheduled.date}{' '}
+                                {dest.scheduled.start}~{dest.scheduled.end} · {dest.scheduled.transport}
+                              </span>
+                            ) : (
+                              <span className="text-[#B85D19]">
+                                ⚠️ 未安排 (點擊展開並排入行程日期)
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openScheduleModal(dest);
+                          }}
+                          className="px-3 py-1.5 rounded-xl bg-[#1A5D42] hover:bg-[#134631] text-white text-[11px] font-extrabold shrink-0 shadow-2xs transition"
+                        >
+                          📅 排程
+                        </button>
+                      </div>
+
+                      {/* 展開詳細資訊與操作列 */}
+                      {isExpanded && (
+                        <div className="px-3 pb-3 pt-2 border-t border-[#E2EFE8] bg-white/90 space-y-2 text-xs">
+                          {dest.formattedAddress && (
+                            <div className="text-[#455E52] flex items-start gap-1.5">
+                              <MapPin className="w-3.5 h-3.5 text-[#C24726] shrink-0 mt-0.5" />
+                              <span>{dest.formattedAddress}</span>
+                            </div>
+                          )}
+                          {dest.nationalPhoneNumber && (
+                            <div className="text-[#455E52] flex items-center gap-1.5">
+                              <Phone className="w-3.5 h-3.5 text-[#1A5D42] shrink-0" />
+                              <span>
+                                {dest.nationalPhoneNumber}
+                                {dest.userRatingCount
+                                  ? ` · 共 ${dest.userRatingCount.toLocaleString()} 則評論`
+                                  : ''}
+                              </span>
+                            </div>
+                          )}
+                          {dest.weekdayDescriptions && dest.weekdayDescriptions.length > 0 && (
+                            <details className="text-[11px] text-[#5A7066] bg-[#F4FAF6] p-2 rounded-xl">
+                              <summary className="font-bold cursor-pointer text-[#1A5D42]">
+                                🕒 查看營業時間 ({dest.openNow ? '營業中' : '休息中'})
+                              </summary>
+                              <ul className="mt-1 space-y-0.5 pl-2">
+                                {dest.weekdayDescriptions.map((line, i) => (
+                                  <li key={i}>{line}</li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+
+                          <div className="flex flex-wrap items-center justify-end gap-1.5 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => openGoogleMaps(`${dispName} ${dest.formattedAddress || ''}`)}
+                              className="px-2.5 py-1.5 rounded-xl bg-[#E6F1FA] text-[#1D5B96] font-extrabold text-[11px]"
+                            >
+                              🗺️ 地圖
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openEditDestinationModal(dest)}
+                              className="px-2.5 py-1.5 rounded-xl bg-[#EEF4F1] text-[#355245] font-extrabold text-[11px]"
+                            >
+                              ✏️ 編輯資訊/標籤
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteDestination(dest)}
+                              className="px-2.5 py-1.5 rounded-xl bg-[#FBE4DF] text-[#B53D1B] font-extrabold text-[11px]"
+                            >
+                              🗑 刪除
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openScheduleModal(dest)}
+                              className="px-3 py-1.5 rounded-xl bg-[#C24726] text-white font-extrabold text-[11px] shadow-2xs"
+                            >
+                              📅 安排與預算
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-[#DFECE5] text-[#162A22] flex flex-col items-center justify-start md:py-5 select-none">
-      {/* 頂部桌面端輔助控制列 */}
-      <div className="w-full max-w-[438px] px-3 pt-2 pb-1.5 flex items-center justify-between text-xs text-[#2D5444]">
-        <button
-          type="button"
-          onClick={() => {
-            const nextVal = !state.enableSwipeFlip;
-            setState((prev) => ({
-              ...prev,
-              enableSwipeFlip: nextVal,
-              swipeEdgeOnly: true,
-              swipePolicyVersion: 3,
-            }));
-            showToast(
-              nextVal
-                ? '📐 已開啟「僅左右 24px 邊緣」滑動翻頁'
-                : '🔒 已關閉手指滑動翻頁（僅底部導覽列切換，防誤觸）'
-            );
-          }}
-          className="flex items-center gap-1.5 font-bold bg-white/75 hover:bg-white px-2.5 py-1 rounded-lg shadow-2xs transition cursor-pointer"
-          title="點擊快速切換滑動翻頁模式"
-        >
-          <span
-            className={`inline-block w-2 h-2 rounded-full ${
-              state.enableSwipeFlip ? 'bg-[#1F7A54]' : 'bg-[#C24726]'
-            }`}
-          />
-          <span>
-            {state.enableSwipeFlip
-              ? state.swipeEdgeOnly !== false
-                ? '滑動翻頁：僅左右邊緣 (24px)'
-                : '滑動翻頁：全畫面開啟'
-              : '滑動翻頁：已關閉 (僅底部切換)'}
-          </span>
-        </button>
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={flipPrevPage}
-            className="px-2 py-1 rounded-lg bg-white/80 hover:bg-white text-[#1A5D42] font-bold flex items-center shadow-2xs transition"
-            title="上一頁 (3D 翻頁)"
-          >
-            <ChevronLeft className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={flipNextPage}
-            className="px-2 py-1 rounded-lg bg-white/80 hover:bg-white text-[#1A5D42] font-bold flex items-center shadow-2xs transition"
-            title="下一頁 (3D 翻頁)"
-          >
-            <ChevronRight className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowGuideModal(true)}
-            className="px-2.5 py-1 rounded-lg bg-[#1A5D42] text-white font-bold flex items-center gap-1 shadow-xs hover:bg-[#144732] transition"
-          >
-            <BookOpen className="w-3.5 h-3.5" /> 整合指南
-          </button>
-        </div>
-      </div>
-
       {/* Toast 即時回饋訊息 */}
       {toastMessage && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[250] bg-[#162A22] text-white px-4 py-2.5 rounded-2xl shadow-xl text-xs font-bold flex items-center gap-2 border border-[#325E4C]">
@@ -1971,134 +2478,354 @@ export default function App() {
         </div>
       )}
 
-      {/* 📱 手機主框架 (內嵌 StPageFlip 3D 書本翻頁容器 + 固定底部導覽列) */}
+      {/* 📱 手機主框架 (內嵌 StPageFlip 3D 書本翻頁容器 + 固定底部導覽列；已依要求移除最頂端與左右邊緣的滑動說明) */}
       <div className="relative w-full max-w-[438px] bg-[#EDF6F1] md:rounded-[38px] md:shadow-[0_24px_60px_rgba(18,52,38,0.16)] md:border-[6px] md:border-white/90 overflow-hidden flex flex-col">
-        {/* 當開啟「左右兩側邊緣觸發 (24px)」時，顯示淡淡的左右邊緣觸發區視覺提示線 */}
-        {state.enableSwipeFlip && state.swipeEdgeOnly !== false && (
-          <>
-            <div
-              className="pointer-events-none absolute left-0 top-14 bottom-20 w-[24px] z-30 border-r border-dashed border-[#1A5D42]/25 bg-gradient-to-r from-[#1A5D42]/10 to-transparent flex items-center justify-center"
-              aria-hidden="true"
-            >
-              <span className="text-[9px] font-extrabold text-[#1A5D42]/50 [writing-mode:vertical-rl] tracking-widest">
-                ◀ 邊緣翻頁區
-              </span>
-            </div>
-            <div
-              className="pointer-events-none absolute right-0 top-14 bottom-20 w-[24px] z-30 border-l border-dashed border-[#1A5D42]/25 bg-gradient-to-l from-[#1A5D42]/10 to-transparent flex items-center justify-center"
-              aria-hidden="true"
-            >
-              <span className="text-[9px] font-extrabold text-[#1A5D42]/50 [writing-mode:vertical-rl] tracking-widest">
-                邊緣翻頁區 ▶
-              </span>
-            </div>
-          </>
-        )}
-
         {/* 📖 StPageFlip 3D 書本容器 */}
         <div ref={bookContainerRef} className="w-full flex-1">
           {/* =====================================================================
-              PAGE 1 (Index 0): 來回程與住宿資訊頁 (TRIPS - 1:1 還原 Figma 截圖 1)
+              PAGE 0 (Index 0): 探索與行前百寶箱頁 (DISCOVER - 排在第一頁，切換至 Trips 絕不閃過 Plan)
+             ===================================================================== */}
+          <div className="tabi-book-page w-full h-full">
+            <div className="h-[780px] overflow-y-auto pb-24 tabi-scroll bg-[#EDF6F1]">
+              {renderPageHeader('DISCOVER')}
+
+              <div className="px-5 space-y-4" data-no-flip="true">
+                <div className="pt-1 flex items-center justify-between">
+                  <div>
+                    <h1 className="text-[25px] font-black tracking-tight text-[#14241D]">
+                      口袋清單 & 旅途百寶箱
+                    </h1>
+                    <p className="text-[12px] text-[#5D4C44] font-medium mt-0.5">
+                      跨 PWA 景點匯入、私房靈感推薦、行前檢查與日英手指溝通卡 🧭
+                    </p>
+                  </div>
+                </div>
+
+                {/* 1. 完整目的地清單管理區 (手動輸入 / 文字.txt 匯入 / 日期編排) */}
+                {renderDestinationPoolSection()}
+
+                {/* 2. 🗣️ 升級版：旅途實用「手指日語 / 英語」溝通大字卡 (支援日語/英語切換，點擊放大給店員看) */}
+                <div className="bg-white rounded-[26px] p-4 shadow-sm border border-[#E2EFE8] space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[15px] font-extrabold text-[#162921] flex items-center gap-1.5">
+                      <span>🗣️</span>
+                      <span>手指溝通卡（點擊放大）</span>
+                    </div>
+
+                    {/* 日語版 / 英語版 切換按鈕 */}
+                    <div className="flex items-center bg-[#EAF4EF] p-0.5 rounded-xl border border-[#CFE3D8]">
+                      <button
+                        type="button"
+                        onClick={() => setPhraseLang('jp')}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold transition ${
+                          phraseLang === 'jp'
+                            ? 'bg-[#1A5D42] text-white shadow-2xs'
+                            : 'text-[#355245] hover:text-[#14241D]'
+                        }`}
+                      >
+                        🇯🇵 日語版
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPhraseLang('en')}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold transition ${
+                          phraseLang === 'en'
+                            ? 'bg-[#1A5D42] text-white shadow-2xs'
+                            : 'text-[#355245] hover:text-[#14241D]'
+                        }`}
+                      >
+                        🇬🇧 英語版
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {COMMUNICATION_CARDS.map((phrase) => (
+                      <button
+                        key={phrase.tag}
+                        type="button"
+                        onClick={() => setActivePhraseModal(phrase)}
+                        className="p-3 rounded-2xl bg-[#FDF6F3] hover:bg-[#FCEBE4] border border-[#F5DCD2] text-left transition flex flex-col justify-between"
+                      >
+                        <div>
+                          <div className="text-[10.5px] font-extrabold text-[#B8431F]">
+                            {phrase.tag}
+                          </div>
+                          <div className="text-[12px] font-extrabold text-[#14241D] mt-0.5 line-clamp-1">
+                            {phrase.zh}
+                          </div>
+                        </div>
+                        <div className="text-[10.5px] text-[#6E5D54] truncate mt-1 font-semibold">
+                          {phraseLang === 'jp' ? phrase.jp : phrase.en}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 3. 🌸 當地私房靈感推薦 (隨目的地自動轉變 + 支援景點/美食篩選與「🔄 換一批」切換按鈕) */}
+                <div className="bg-white rounded-[26px] p-4 shadow-sm border border-[#E2EFE8] space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="text-[15px] font-extrabold text-[#162921] flex items-center gap-1.5">
+                        <Sparkles className="w-4 h-4 text-[#C24726] shrink-0" />
+                        <span>私房景點與美食靈感</span>
+                      </div>
+                      <p className="text-[11px] text-[#5B7368] font-bold mt-0.5">
+                        📍 已根據目的地「{curatedGemData.regionLabel}」自動推薦（共 {filteredGems.length} 選）
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setGemBatchIndex((prev) => (prev + 1) % totalGemBatches)}
+                      className="px-3 py-1.5 rounded-xl bg-[#FCE3DA] hover:bg-[#f7d2c4] text-[#B83E1B] text-[11px] font-extrabold flex items-center gap-1 shrink-0 shadow-2xs transition active:scale-95"
+                    >
+                      <Shuffle className="w-3 h-3" />
+                      <span>
+                        換一批 ({safeGemBatchIndex + 1}/{totalGemBatches})
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* 全部 / ⛩️ 景點 / 🍜 美食 切換標籤 */}
+                  <div className="flex items-center gap-1.5">
+                    {(
+                      [
+                        { key: 'all', label: `全部 (${curatedGemData.gems.length})` },
+                        {
+                          key: 'spot',
+                          label: `⛩️ 私房景點 (${curatedGemData.gems.filter((g) => g.category === 'spot').length})`,
+                        },
+                        {
+                          key: 'food',
+                          label: `🍜 在地美食 (${curatedGemData.gems.filter((g) => g.category === 'food').length})`,
+                        },
+                      ] as const
+                    ).map((tab) => (
+                      <button
+                        key={tab.key}
+                        type="button"
+                        onClick={() => {
+                          setGemCategoryFilter(tab.key);
+                          setGemBatchIndex(0);
+                        }}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold transition ${
+                          gemCategoryFilter === tab.key
+                            ? 'bg-[#1A5D42] text-white shadow-2xs'
+                            : 'bg-[#F0F7F3] text-[#456355] hover:bg-[#E2EFE8]'
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2">
+                    {visibleGems.map((gem) => {
+                      const alreadyInPool = state.destinations.some(
+                        (d) =>
+                          (d.customName || d.name).includes(gem.name.split('（')[0].split('・')[0]) ||
+                          d.id === gem.id
+                      );
+                      return (
+                        <div
+                          key={gem.id}
+                          className="p-3 rounded-2xl bg-[#F4FAF6] border border-[#DCEAE2] flex items-center justify-between gap-2.5"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="px-1.5 py-0.2 rounded bg-white text-[#1A5D42] border border-[#CFE3D8] text-[9.5px] font-extrabold shrink-0">
+                                {gem.category === 'food' ? '🍜 美食' : '⛩️ 景點'}
+                              </span>
+                              <span className="text-[13px] font-extrabold text-[#14241D] truncate">
+                                {gem.name}
+                              </span>
+                              <span className="text-[10.5px] font-extrabold text-[#B8431F] shrink-0">
+                                ★ {gem.rating}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-[#5B7368] truncate mt-0.5">
+                              {gem.tag}
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={alreadyInPool}
+                            onClick={() => {
+                              if (alreadyInPool) return;
+                              const newDest: SavedDestination = {
+                                id: gem.id,
+                                name: gem.name,
+                                customName: gem.name,
+                                customCity: curatedGemData.regionLabel.split('・')[0],
+                                customTags: [gem.category === 'food' ? '美食' : '景點', '私房推薦'],
+                                formattedAddress: gem.address,
+                                rating: gem.rating,
+                                openNow: true,
+                                scheduled: null,
+                              };
+                              setState((prev) => ({
+                                ...prev,
+                                destinations: [newDest, ...prev.destinations],
+                              }));
+                              showToast(`✨ 已將「${gem.name}」加入目的地清單！`);
+                            }}
+                            className={`px-3 py-1.5 rounded-xl text-[11px] font-extrabold shrink-0 transition ${
+                              alreadyInPool
+                                ? 'bg-[#DCEAE2] text-[#5B7368] cursor-default'
+                                : 'bg-[#1A5D42] hover:bg-[#134631] text-white shadow-2xs'
+                            }`}
+                          >
+                            {alreadyInPool ? '✓ 已在清單' : '＋ 加入清單'}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 4. 🧳 行前必備檢查清單 (Pre-Trip Checklist，支援離線勾選保存) */}
+                <div className="bg-white rounded-[26px] p-4 shadow-sm border border-[#E2EFE8] space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[15px] font-extrabold text-[#162921] flex items-center gap-2">
+                      <PlaneTakeoff className="w-4 h-4 text-[#1A5D42]" />
+                      <span>行前必備檢查清單</span>
+                    </div>
+                    <span className="text-[11px] font-extrabold text-[#1A5D42]">
+                      已完成 {checkedPrepIds.length} / 6
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { id: 'passport', label: '護照效期滿 6 個月' },
+                      { id: 'vjw', label: 'VJW 入境 QR 截圖' },
+                      { id: 'esim', label: 'eSIM / 漫遊網卡' },
+                      { id: 'icoca', label: 'ICOCA / Suica 交通卡' },
+                      { id: 'cash', label: '日幣現金 & 信用卡' },
+                      { id: 'powerbank', label: '行動電源 (隨身攜帶)' },
+                    ].map((item) => {
+                      const checked = checkedPrepIds.includes(item.id);
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => togglePrepItem(item.id)}
+                          className={`p-2.5 rounded-2xl border text-left flex items-center gap-2 transition ${
+                            checked
+                              ? 'bg-[#E3F3EB] border-[#98DEC2] text-[#134B35]'
+                              : 'bg-[#F8FBF9] border-[#E2EFE8] text-[#4E645A]'
+                          }`}
+                        >
+                          <span
+                            className={`w-4 h-4 rounded-md flex items-center justify-center text-[10px] font-black shrink-0 ${
+                              checked
+                                ? 'bg-[#1A5D42] text-white'
+                                : 'border border-[#B5C9BF] bg-white text-transparent'
+                            }`}
+                          >
+                            ✓
+                          </span>
+                          <span
+                            className={`text-[11.5px] font-extrabold leading-tight ${
+                              checked ? 'line-through opacity-80' : ''
+                            }`}
+                          >
+                            {item.label}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* =====================================================================
+              PAGE 1 (Index 1): 來回程與住宿資訊頁 (TRIPS - 1:1 還原 Figma 截圖 1)
              ===================================================================== */}
           <div className="tabi-book-page w-full h-full">
             <div className="h-[780px] overflow-y-auto pb-24 tabi-scroll bg-[#EDF6F1]">
               {renderPageHeader('TRIPS')}
 
               <div className="px-5 space-y-4">
-                {/* 頂部雙按鈕列：Ready to wander! + 匯出/匯入 共享行程 */}
-                <div className="flex items-center justify-between gap-2.5 pt-1" data-no-flip="true">
+                {/* 頂部「📥 匯入 Location 資料」&「共享」按鈕列 (已依要求移除 Ready to wander!) */}
+                <div className="flex items-center justify-end gap-1.5 pt-1" data-no-flip="true">
                   <button
                     type="button"
-                    onClick={() => setShowTripModal(true)}
-                    className="px-4 py-2 rounded-full bg-[#AEE5CE] hover:bg-[#9ddbc1] text-[#154D36] text-[13px] font-bold flex items-center gap-1.5 shadow-2xs transition"
+                    onClick={handleImportFromClipboard}
+                    className="px-3 py-2 rounded-full bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12px] font-extrabold flex items-center gap-1 shadow-xs transition"
                   >
-                    <span>✈️</span>
-                    <span>Ready to wander!</span>
-                    <span>✨</span>
+                    <span>📥</span>
+                    <span>匯入 Location 資料</span>
                   </button>
-
                   <button
                     type="button"
                     onClick={() => setShowCloudShareModal(true)}
-                    className="px-4 py-2 rounded-full bg-white hover:bg-[#F9FCFA] text-[#1C2E26] text-[13px] font-bold flex items-center gap-1.5 shadow-xs border border-[#E2EDE7] transition"
+                    title="匯出備份或雲端共享行程"
+                    className="p-2 rounded-full bg-white hover:bg-[#F9FCFA] text-[#1C2E26] shadow-xs border border-[#E2EDE7] transition"
                   >
-                    <Share2 className="w-3.5 h-3.5 text-[#D8562B]" />
-                    <span>匯出/匯入 共享行程</span>
+                    <Share2 className="w-4 h-4 text-[#D8562B]" />
                   </button>
                 </div>
 
-                {/* 🌸 主視覺記憶卡片 (Hero Card) */}
+                {/* 🌸 主視覺記憶卡片 (Hero Card)：已移除上方雙膠囊標籤，並將「✏️ 點擊圖片編輯旅程」移至圖片右下角 */}
                 <div className="rounded-[28px] bg-white shadow-sm border border-[#E2EFE8] overflow-hidden">
                   <div
-                    className="relative h-[242px] w-full bg-cover bg-center flex flex-col justify-between p-4"
+                    onClick={() => setShowTripModal(true)}
+                    data-no-flip="true"
+                    title="點擊圖片編輯目的地、起訖日期與自動尋找圖片"
+                    className="relative h-[242px] w-full bg-cover bg-center flex flex-col justify-end p-4 cursor-pointer group"
                     style={{
-                      backgroundImage: `url('/assets/tabi/hero_kyoto.png')`,
+                      backgroundImage: `url('${state.trip.heroPhotoUrl || '/assets/tabi/hero_kyoto.png'}')`,
                     }}
                   >
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-black/10 pointer-events-none" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/25 to-transparent group-hover:from-black/85 transition pointer-events-none" />
 
-                    {/* 上方雙膠囊標籤 */}
-                    <div className="relative z-10 flex items-center justify-between gap-2" data-no-flip="true">
-                      <button
-                        type="button"
-                        onClick={() => setShowTripModal(true)}
-                        className="px-3.5 py-1.5 rounded-2xl bg-[#FFFDF9]/95 text-[#A53816] text-[12px] font-extrabold leading-tight flex items-center gap-2 shadow-sm text-left"
-                      >
-                        <Ticket className="w-4 h-4 text-[#C84B24] shrink-0" />
-                        <span>
-                          {state.trip.memoryTag.split('#')[0]}
-                          <br />#{state.trip.memoryTag.split('#')[1] || '04'}
-                        </span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setShowTripModal(true)}
-                        className="px-3.5 py-1.5 rounded-2xl bg-[#AEE8D1]/95 text-[#14533A] text-[12px] font-extrabold leading-tight flex items-center gap-1.5 shadow-sm"
-                      >
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#155E42] inline-block" />
-                        <span className="text-left">
-                          {state.trip.statusTag}
-                          <br />
-                          <span className="inline-block w-3 h-3 rounded-full bg-[#7CB518] align-middle" />
-                        </span>
-                      </button>
-                    </div>
-
-                    {/* 下方目的地大標題與日期 */}
-                    <div
-                      className="relative z-10 text-white cursor-pointer"
-                      onClick={() => setShowTripModal(true)}
-                      data-no-flip="true"
-                    >
-                      <div className="flex items-center gap-1.5 text-[13px] font-bold text-[#FCE5DC] drop-shadow-xs mb-0.5">
-                        <CalendarCheck className="w-4 h-4 text-[#FADBD0]" />
-                        <span>{state.trip.dateRangeLabel}</span>
+                    {/* 下方目的地大標題與日期 + 右下角「✏️ 點擊圖片編輯旅程」 */}
+                    <div className="relative z-10 text-white pointer-events-none flex items-end justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 text-[13px] font-bold text-[#FCE5DC] drop-shadow-xs mb-0.5">
+                          <CalendarCheck className="w-4 h-4 text-[#FADBD0] shrink-0" />
+                          <span className="truncate">{state.trip.dateRangeLabel}</span>
+                        </div>
+                        <h1 className="text-[31px] font-extrabold tracking-tight leading-none drop-shadow-sm truncate">
+                          {state.trip.destinationTitle}
+                        </h1>
+                        <p className="text-[12.5px] text-white/90 font-medium mt-1.5 truncate">
+                          {state.trip.subtitle}
+                        </p>
                       </div>
-                      <h1 className="text-[31px] font-extrabold tracking-tight leading-none drop-shadow-sm">
-                        {state.trip.destinationTitle}
-                      </h1>
-                      <p className="text-[12.5px] text-white/90 font-medium mt-1.5 truncate">
-                        {state.trip.subtitle}
-                      </p>
+
+                      <span className="px-2.5 py-1 rounded-full bg-black/55 text-white/95 text-[10.5px] font-extrabold backdrop-blur-xs shrink-0 shadow-xs border border-white/20">
+                        ✏️ 點擊圖片編輯旅程
+                      </span>
                     </div>
                   </div>
 
-                  {/* 櫻花氣候提示底欄 */}
-                  <div className="px-4 py-3 bg-white flex items-center justify-between gap-2">
+                  {/* 季節氣候與旅遊小貼士底欄（會隨「目的地」與「出發月份」自動動態轉換，不再固定不變！點擊亦可自訂） */}
+                  <div
+                    onClick={() => setShowTripModal(true)}
+                    data-no-flip="true"
+                    title="根據目的地與出發月份自動轉換季節氣候提示（點擊可編輯旅程）"
+                    className="px-4 py-3 bg-white hover:bg-[#F8FCFA] flex items-center justify-between gap-2 cursor-pointer transition"
+                  >
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="text-2xl shrink-0">🌸</span>
+                      <span className="text-2xl shrink-0">{seasonalBanner.emoji}</span>
                       <div className="min-w-0">
                         <div className="text-[13px] font-extrabold text-[#182B23] truncate">
-                          {state.trip.weatherTitle}
+                          {seasonalBanner.weatherTitle}
                         </div>
                         <div className="text-[11.5px] text-[#5B7368] truncate">
-                          {state.trip.weatherSub}
+                          {seasonalBanner.weatherSub}
                         </div>
                       </div>
                     </div>
                     <span className="px-3 py-1 rounded-full bg-[#FCE3DA] text-[#B83E1B] text-[11px] font-extrabold shrink-0">
-                      {state.trip.weatherBadge}
+                      {seasonalBanner.weatherBadge}
                     </span>
                   </div>
                 </div>
@@ -2330,7 +3057,10 @@ export default function App() {
 
                     <button
                       type="button"
-                      onClick={() => setShowStayModal(true)}
+                      onClick={() => {
+                        setHotelCandidates([]);
+                        setShowStayModal(true);
+                      }}
                       className="px-3 py-1 rounded-full bg-[#BDE9D3] hover:bg-[#addfc6] text-[#15563B] text-[11.5px] font-extrabold flex items-center gap-1 transition"
                     >
                       <CheckCircle2 className="w-3.5 h-3.5" />
@@ -2352,7 +3082,10 @@ export default function App() {
                           <span>· {state.stay.category}</span>
                         </div>
                         <h3
-                          onClick={() => setShowStayModal(true)}
+                          onClick={() => {
+                            setHotelCandidates([]);
+                            setShowStayModal(true);
+                          }}
                           className="text-[17px] font-extrabold text-[#152720] leading-snug mt-0.5 cursor-pointer hover:text-[#1D6B4B] truncate"
                           data-no-flip="true"
                         >
@@ -2375,7 +3108,10 @@ export default function App() {
 
                     {/* CHECK-IN / CHECK-OUT */}
                     <div
-                      onClick={() => setShowStayModal(true)}
+                      onClick={() => {
+                        setHotelCandidates([]);
+                        setShowStayModal(true);
+                      }}
                       className="rounded-2xl bg-[#E3F1EC] px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-[#d9ebe4] transition"
                       data-no-flip="true"
                     >
@@ -2411,51 +3147,19 @@ export default function App() {
                         onClick={() => openGoogleMaps(`${state.stay.hotelName} ${state.stay.address}`)}
                         className="px-3 py-1 rounded-full bg-[#1C6748] hover:bg-[#144f37] text-white text-[11.5px] font-bold flex items-center gap-1 shrink-0 shadow-2xs transition"
                       >
-                        <span>🗺️ Open</span>
+                        <span>🗺️ 地圖</span>
                       </button>
                     </div>
 
-                    {/* Insider Scoop 提示框 */}
+                    {/* 住宿小貼士 (已轉為繁體中文) */}
                     <div className="rounded-2xl bg-[#FDF0E7] p-3.5 flex items-start gap-2.5 text-[12px] leading-relaxed text-[#5C3626]">
                       <span className="text-base shrink-0">💡</span>
                       <div>
-                        <strong className="text-[#9E3516] font-extrabold">Insider Scoop: </strong>
+                        <strong className="text-[#9E3516] font-extrabold">住宿小貼士：</strong>
                         {state.stay.insiderScoop}
                       </div>
                     </div>
                   </div>
-                </div>
-
-                {/* 🍵 ICOCA Card reloaded! 底部交通卡橫幅 */}
-                <div
-                  onClick={() => {
-                    setState((prev) => ({
-                      ...prev,
-                      trip: {
-                        ...prev.trip,
-                        icocaBalance: prev.trip.icocaBalance + 1000,
-                        icocaSub: `¥${(prev.trip.icocaBalance + 1000).toLocaleString()} ready for subway & vending machines`,
-                      },
-                    }));
-                    showToast('🍵 ICOCA 卡已加值 ¥1,000！');
-                  }}
-                  className="rounded-[26px] bg-gradient-to-r from-[#BCEAD5] to-[#D6F3E5] p-4 flex items-center justify-between gap-3 cursor-pointer shadow-xs hover:brightness-98 transition"
-                  data-no-flip="true"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-full bg-white flex items-center justify-center text-xl shadow-2xs shrink-0">
-                      🍵
-                    </div>
-                    <div>
-                      <div className="text-[14.5px] font-extrabold text-[#16573C]">
-                        {state.trip.icocaTitle}
-                      </div>
-                      <div className="text-[12px] text-[#2E6F54] font-medium">
-                        {state.trip.icocaSub}
-                      </div>
-                    </div>
-                  </div>
-                  <span className="text-[#16573C] text-xl font-bold pr-1">→</span>
                 </div>
               </div>
             </div>
@@ -3236,26 +3940,147 @@ export default function App() {
 
                 {/* 🧾 快速記帳 Quick Expense Log */}
                 <div className="space-y-3 pt-1" data-no-flip="true">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <h2 className="text-[18px] font-extrabold text-[#14241D]">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-1.5">
+                      <h2 className="text-[17.5px] font-extrabold text-[#14241D]">
                         快速記帳 Quick Expense Log
                       </h2>
-                      <span className="px-2.5 py-0.5 rounded-full bg-[#FBE2D8] text-[#B53D1B] text-[11px] font-extrabold">
+                      <span className="px-2 py-0.5 rounded-full bg-[#FBE2D8] text-[#B53D1B] text-[10.5px] font-extrabold">
                         4 類別
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedCategoryFilter('all');
-                        setShowExpenseDetailList((prev) => !prev);
-                      }}
-                      className="text-[12px] font-extrabold text-[#B53D1B] hover:underline"
-                    >
-                      {showExpenseDetailList ? '收起明細' : '查看明細'}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowExpensePieChart((prev) => !prev)}
+                        className={`px-2.5 py-1 rounded-full text-[11.5px] font-extrabold flex items-center gap-1 transition shadow-2xs ${
+                          showExpensePieChart
+                            ? 'bg-[#1A5D42] text-white'
+                            : 'bg-white hover:bg-[#EAF4EF] text-[#1A5D42] border border-[#CFE3D8]'
+                        }`}
+                      >
+                        <PieChartIcon className="w-3.5 h-3.5" />
+                        <span>{showExpensePieChart ? '收起分佈圖' : '檢視消費分佈圖'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedCategoryFilter('all');
+                          setShowExpenseDetailList((prev) => !prev);
+                        }}
+                        className="text-[12px] font-extrabold text-[#B53D1B] hover:underline"
+                      >
+                        {showExpenseDetailList ? '收起明細' : '查看明細'}
+                      </button>
+                    </div>
                   </div>
+
+                  {/* 📊 Recharts 消費分佈圓餅圖 (Pie Chart) */}
+                  {showExpensePieChart && (
+                    <div className="bg-white rounded-[26px] p-4 shadow-xs border border-[#CFE3D8] space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className="text-[14px] font-extrabold text-[#14241D] flex items-center gap-1.5">
+                            <PieChartIcon className="w-4 h-4 text-[#DF6437]" />
+                            <span>四大類別消費預算佔比</span>
+                          </div>
+                          <p className="text-[11px] text-[#5B7368] mt-0.5">
+                            總花費 ¥{totalSpentJPY.toLocaleString()} · 點擊下方類別可篩選明細
+                          </p>
+                        </div>
+                        <span className="px-2.5 py-1 rounded-full bg-[#EAF4EF] text-[#1A5D42] text-[11px] font-extrabold tabular-nums">
+                          預算已用 {budgetSpentPercent}%
+                        </span>
+                      </div>
+
+                      {totalSpentJPY > 0 ? (
+                        <div className="h-[200px] w-full relative">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <PieChart>
+                              <Pie
+                                data={expensePieData.filter((d) => d.value > 0)}
+                                dataKey="value"
+                                nameKey="name"
+                                cx="50%"
+                                cy="50%"
+                                innerRadius={52}
+                                outerRadius={80}
+                                paddingAngle={3}
+                                stroke="#ffffff"
+                                strokeWidth={2}
+                              >
+                                {expensePieData
+                                  .filter((d) => d.value > 0)
+                                  .map((entry) => (
+                                    <Cell key={entry.key} fill={entry.color} />
+                                  ))}
+                              </Pie>
+                              <Tooltip
+                                formatter={(value: any, name: any) => [
+                                  `¥${Number(value || 0).toLocaleString()} (${
+                                    totalSpentJPY > 0
+                                      ? Math.round((Number(value || 0) / totalSpentJPY) * 100)
+                                      : 0
+                                  }%)`,
+                                  String(name),
+                                ]}
+                                contentStyle={{
+                                  borderRadius: '14px',
+                                  border: '1px solid #DCEAE2',
+                                  fontSize: '12px',
+                                  fontWeight: 800,
+                                }}
+                              />
+                            </PieChart>
+                          </ResponsiveContainer>
+                          {/* 圓餅圖中心總額標籤 */}
+                          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                            <span className="text-[10px] font-bold text-[#6E7F77]">總支出</span>
+                            <span className="text-[13.5px] font-black text-[#14241D] tabular-nums">
+                              ¥{totalSpentJPY.toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="py-8 text-center text-xs text-[#6E7F77] font-bold">
+                          目前尚無消費金額，新增支出後即可顯示圓餅分佈圖！
+                        </div>
+                      )}
+
+                      {/* 4 大類別佔比圖例卡片 */}
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        {expensePieData.map((item) => (
+                          <button
+                            key={item.key}
+                            type="button"
+                            onClick={() => {
+                              setSelectedCategoryFilter(item.key);
+                              setShowExpenseDetailList(true);
+                            }}
+                            className="p-2.5 rounded-2xl bg-[#F4FAF6] hover:bg-[#EAF4EF] border border-[#E2EFE8] flex items-center justify-between gap-2 text-left transition"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span
+                                className="w-3 h-3 rounded-full shrink-0"
+                                style={{ backgroundColor: item.color }}
+                              />
+                              <span className="text-[12px] font-extrabold text-[#14241D] truncate">
+                                {item.name}
+                              </span>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <div className="text-[12px] font-black text-[#14241D] tabular-nums">
+                                {item.percent}%
+                              </div>
+                              <div className="text-[10px] text-[#5B7368] font-bold tabular-nums">
+                                ¥{item.value.toLocaleString()}
+                              </div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* 4 大消費類別總覽卡片 */}
                   <div className="space-y-2.5">
@@ -3359,9 +4184,11 @@ export default function App() {
                           .map((item) => (
                             <div
                               key={item.id}
-                              className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[#F4FAF6] border border-[#E2EFE8]"
+                              onClick={() => openEditExpenseModal(item)}
+                              title="點擊修改數量或價錢"
+                              className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[#F4FAF6] hover:bg-[#EAF4EF] border border-[#E2EFE8] cursor-pointer transition"
                             >
-                              <div className="min-w-0">
+                              <div className="min-w-0 flex-1">
                                 <div className="text-[13.5px] font-extrabold text-[#162921] truncate">
                                   {item.title}
                                 </div>
@@ -3369,8 +4196,8 @@ export default function App() {
                                   {item.shopOrNote} · {item.createdAt}
                                 </div>
                               </div>
-                              <div className="flex items-center gap-2.5 shrink-0">
-                                <div className="text-right">
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <div className="text-right mr-1">
                                   <div className="text-[13.5px] font-extrabold text-[#162921] tabular-nums">
                                     ¥{item.amountJPY.toLocaleString()}
                                   </div>
@@ -3382,7 +4209,21 @@ export default function App() {
                                 </div>
                                 <button
                                   type="button"
-                                  onClick={() => handleDeleteExpense(item.id)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openEditExpenseModal(item);
+                                  }}
+                                  title="修改數量或價錢"
+                                  className="w-7 h-7 rounded-full bg-[#E1F1E9] hover:bg-[#cce6d9] text-[#1A5D42] flex items-center justify-center transition"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteExpense(item.id);
+                                  }}
                                   title="刪除此筆消費"
                                   className="w-7 h-7 rounded-full bg-[#FBE4DF] hover:bg-[#f5cdc4] text-[#B53D1B] flex items-center justify-center transition"
                                 >
@@ -3400,44 +4241,125 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* 🍵 今日最新小確幸 Highlight Card */}
-                  {latestExpense && (
-                    <div className="rounded-[24px] bg-[#E3F1EB] p-3.5 flex items-center justify-between gap-3 border border-[#CFE4DA]">
-                      <div className="flex items-center gap-3 min-w-0">
-                        <img
-                          src={latestExpense.photoUrl || '/assets/tabi/matcha_parfait.png'}
-                          alt={latestExpense.title}
-                          className="w-16 h-16 rounded-2xl object-cover shrink-0 shadow-2xs"
-                          referrerPolicy="no-referrer"
-                        />
-                        <div className="min-w-0">
-                          <div className="text-[11px] font-extrabold text-[#1A6646]">
-                            今日最新小確幸
-                          </div>
-                          <div className="text-[16px] font-extrabold text-[#14241D] truncate">
-                            {latestExpense.title}
-                          </div>
-                          <div className="text-[12px] text-[#66564E] truncate mt-0.5">
-                            {latestExpense.shopOrNote} · ¥{latestExpense.amountJPY.toLocaleString()} · 記在「
-                            {latestExpense.category === 'shopping'
-                              ? '購物'
-                              : latestExpense.category === 'dining'
-                              ? '飲食'
-                              : latestExpense.category === 'transport'
-                              ? '交通'
-                              : '手信'}
-                            」
-                          </div>
+                  {/* 🍵 今日最新小確幸 Highlight Card (會隨目的地自動推薦在地必吃/伴手禮，支援「🎲 換一個」與「＋ 記一筆」) */}
+                  {currentRecommendedTreat && (
+                    <div className="rounded-[24px] bg-[#E3F1EB] p-3.5 border border-[#CFE4DA] space-y-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[11px] font-extrabold text-[#1A6646]">
+                            {showCustomLatestExpense && latestExpense
+                              ? '🧾 最新記帳小確幸'
+                              : `🍵 今日最新小確幸（📍 ${curatedGemData.regionLabel}推薦）`}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          {latestExpense && (
+                            <button
+                              type="button"
+                              onClick={() => setShowCustomLatestExpense((prev) => !prev)}
+                              className="px-2 py-0.5 rounded-full bg-white/80 hover:bg-white text-[#1A5D42] text-[10px] font-extrabold transition"
+                            >
+                              {showCustomLatestExpense ? '看目的地推薦' : '看最新記帳'}
+                            </button>
+                          )}
+                          {!showCustomLatestExpense && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setTreatIndex((prev) => (prev + 1) % destinationTreats.length)
+                              }
+                              className="px-2.5 py-0.5 rounded-full bg-[#FCE3DA] hover:bg-[#f7d0c1] text-[#B83E1B] text-[10.5px] font-extrabold flex items-center gap-1 transition active:scale-95"
+                            >
+                              <Dices className="w-3 h-3" />
+                              <span>換一個</span>
+                            </button>
+                          )}
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setShowExpenseDetailList((prev) => !prev)}
-                        className="w-7 h-7 rounded-full border-2 border-[#1A6646] text-[#1A6646] flex items-center justify-center shrink-0"
-                        title="點擊展開/管理明細"
-                      >
-                        <Check className="w-4 h-4 stroke-[2.5]" />
-                      </button>
+
+                      {showCustomLatestExpense && latestExpense ? (
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <img
+                              src={latestExpense.photoUrl || '/assets/tabi/matcha_parfait.png'}
+                              alt={latestExpense.title}
+                              className="w-14 h-14 rounded-2xl object-cover shrink-0 shadow-2xs"
+                              referrerPolicy="no-referrer"
+                            />
+                            <div className="min-w-0">
+                              <div className="text-[15.5px] font-extrabold text-[#14241D] truncate">
+                                {latestExpense.title}
+                              </div>
+                              <div className="text-[11.5px] text-[#66564E] truncate mt-0.5">
+                                {latestExpense.shopOrNote} · ¥{latestExpense.amountJPY.toLocaleString()} · 記在「
+                                {latestExpense.category === 'shopping'
+                                  ? '購物'
+                                  : latestExpense.category === 'dining'
+                                  ? '飲食'
+                                  : latestExpense.category === 'transport'
+                                  ? '交通'
+                                  : '手信'}
+                                」
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowExpenseDetailList((prev) => !prev)}
+                            className="w-7 h-7 rounded-full border-2 border-[#1A6646] text-[#1A6646] flex items-center justify-center shrink-0"
+                            title="點擊展開/管理明細"
+                          >
+                            <Check className="w-4 h-4 stroke-[2.5]" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between gap-2.5">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <img
+                              src={currentRecommendedTreat.photoUrl}
+                              alt={currentRecommendedTreat.title}
+                              className="w-14 h-14 rounded-2xl object-cover shrink-0 shadow-2xs"
+                              referrerPolicy="no-referrer"
+                            />
+                            <div className="min-w-0">
+                              <div className="text-[15.5px] font-extrabold text-[#14241D] truncate">
+                                {currentRecommendedTreat.title}
+                              </div>
+                              <div className="text-[11.5px] text-[#66564E] truncate mt-0.5">
+                                {currentRecommendedTreat.shop} · {currentRecommendedTreat.localPriceHint}
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newExp: ExpenseItem = {
+                                id: `exp-treat-${Date.now()}`,
+                                category: currentRecommendedTreat.category,
+                                title: currentRecommendedTreat.title,
+                                shopOrNote: currentRecommendedTreat.shop,
+                                amountJPY: currentRecommendedTreat.amountJPY,
+                                originalAmount: currentRecommendedTreat.amountJPY,
+                                originalCurrency: 'JPY',
+                                createdAt: '剛剛',
+                                photoUrl: currentRecommendedTreat.photoUrl,
+                              };
+                              setState((prev) => ({
+                                ...prev,
+                                expenses: [...prev.expenses, newExp],
+                              }));
+                              showToast(
+                                `🍵 已將小確幸「${currentRecommendedTreat.title} (¥${currentRecommendedTreat.amountJPY.toLocaleString()})」記入支出！`
+                              );
+                            }}
+                            className="px-3 py-1.5 rounded-xl bg-[#1A5D42] hover:bg-[#134631] text-white text-[11px] font-extrabold shrink-0 shadow-2xs transition active:scale-95"
+                            title="一鍵把這個目的地小確幸記入消費明細"
+                          >
+                            ＋ 記一筆
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -3450,241 +4372,6 @@ export default function App() {
                     <Plus className="w-5 h-5 stroke-[2.5] rounded-full border-2 border-white p-0.5" />
                     <span>＋ 新增一筆支出 (Add Expense)</span>
                   </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* =====================================================================
-              PAGE 4 (Index 3): 探索與行前百寶箱頁 (DISCOVER - 口袋清單 + 精選私房推薦 + 行前檢查表 + 實用手指日語)
-             ===================================================================== */}
-          <div className="tabi-book-page w-full h-full">
-            <div className="h-[780px] overflow-y-auto pb-24 tabi-scroll bg-[#EDF6F1]">
-              {renderPageHeader('DISCOVER')}
-
-              <div className="px-5 space-y-4" data-no-flip="true">
-                <div className="pt-1 flex items-center justify-between">
-                  <div>
-                    <h1 className="text-[25px] font-black tracking-tight text-[#14241D]">
-                      口袋清單 & 旅途百寶箱
-                    </h1>
-                    <p className="text-[12px] text-[#5D4C44] font-medium mt-0.5">
-                      跨 PWA 景點匯入、私房靈感推薦、行前檢查與實用日語卡 🧭
-                    </p>
-                  </div>
-                </div>
-
-                {/* 1. 完整目的地清單管理區 (手動輸入 / 文字.txt 匯入 / 日期編排) */}
-                {renderDestinationPoolSection()}
-
-                {/* 2. 🌸 當地私房靈感推薦 (一鍵加入目的地清單) */}
-                <div className="bg-white rounded-[26px] p-4 shadow-sm border border-[#E2EFE8] space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="text-[15px] font-extrabold text-[#162921] flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-[#C24726]" />
-                      <span>私房景點與美食靈感</span>
-                    </div>
-                    <span className="px-2.5 py-0.5 rounded-full bg-[#E3F2EA] text-[#186043] text-[10.5px] font-extrabold">
-                      一鍵收入清單
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-2">
-                    {[
-                      {
-                        id: 'gem-fushimi',
-                        name: '伏見稻荷大社・千本鳥居',
-                        address: '京都市伏見區深草藪之內町68',
-                        rating: 4.8,
-                        tag: '⛩️ 必訪名所 · 建議清晨或傍晚',
-                      },
-                      {
-                        id: 'gem-arashiyama',
-                        name: '嵐山竹林小徑 & 渡月橋',
-                        address: '京都市右京區嵯峨天龍寺芒之馬場町',
-                        rating: 4.7,
-                        tag: '🎋 自然散策 · 搭配嵐電小火車',
-                      },
-                      {
-                        id: 'gem-uji-matcha',
-                        name: '中村藤吉本店（宇治抹茶芭菲）',
-                        address: '京都府宇治市宇治壹番十番地',
-                        rating: 4.6,
-                        tag: '🍵 百年茗茶 · 必吃竹筒抹茶凍',
-                      },
-                      {
-                        id: 'gem-pontocho',
-                        name: '先斗町・鴨川納涼床料理',
-                        address: '京都市中京區先斗町通',
-                        rating: 4.7,
-                        tag: '🏮 夜間美食 · 河畔町家微醺夜',
-                      },
-                    ].map((gem) => {
-                      const alreadyInPool = state.destinations.some(
-                        (d) => d.name.includes(gem.name.split('・')[0]) || d.id === gem.id
-                      );
-                      return (
-                        <div
-                          key={gem.id}
-                          className="p-3 rounded-2xl bg-[#F4FAF6] border border-[#DCEAE2] flex items-center justify-between gap-2.5"
-                        >
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-[13px] font-extrabold text-[#14241D] truncate">
-                                {gem.name}
-                              </span>
-                              <span className="text-[10.5px] font-extrabold text-[#B8431F] shrink-0">
-                                ★ {gem.rating}
-                              </span>
-                            </div>
-                            <div className="text-[11px] text-[#5B7368] truncate mt-0.5">
-                              {gem.tag}
-                            </div>
-                          </div>
-
-                          <button
-                            type="button"
-                            disabled={alreadyInPool}
-                            onClick={() => {
-                              if (alreadyInPool) return;
-                              const newDest: SavedDestination = {
-                                id: gem.id,
-                                name: gem.name,
-                                formattedAddress: gem.address,
-                                rating: gem.rating,
-                                openNow: true,
-                                scheduled: null,
-                              };
-                              setState((prev) => ({
-                                ...prev,
-                                destinations: [newDest, ...prev.destinations],
-                              }));
-                              showToast(`✨ 已將「${gem.name}」加入目的地清單！`);
-                            }}
-                            className={`px-3 py-1.5 rounded-xl text-[11px] font-extrabold shrink-0 transition ${
-                              alreadyInPool
-                                ? 'bg-[#DCEAE2] text-[#5B7368] cursor-default'
-                                : 'bg-[#1A5D42] hover:bg-[#134631] text-white shadow-2xs'
-                            }`}
-                          >
-                            {alreadyInPool ? '✓ 已在清單' : '＋ 加入清單'}
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* 3. 🧳 行前必備檢查清單 (Pre-Trip Checklist，支援離線勾選保存) */}
-                <div className="bg-white rounded-[26px] p-4 shadow-sm border border-[#E2EFE8] space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="text-[15px] font-extrabold text-[#162921] flex items-center gap-2">
-                      <PlaneTakeoff className="w-4 h-4 text-[#1A5D42]" />
-                      <span>行前必備檢查清單</span>
-                    </div>
-                    <span className="text-[11px] font-extrabold text-[#1A5D42]">
-                      已完成 {checkedPrepIds.length} / 6
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    {[
-                      { id: 'passport', label: '護照效期滿 6 個月' },
-                      { id: 'vjw', label: 'VJW 入境 QR 截圖' },
-                      { id: 'esim', label: 'eSIM / 漫遊網卡' },
-                      { id: 'icoca', label: 'ICOCA / Suica 交通卡' },
-                      { id: 'cash', label: '日幣現金 & 信用卡' },
-                      { id: 'powerbank', label: '行動電源 (隨身攜帶)' },
-                    ].map((item) => {
-                      const checked = checkedPrepIds.includes(item.id);
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => togglePrepItem(item.id)}
-                          className={`p-2.5 rounded-2xl border text-left flex items-center gap-2 transition ${
-                            checked
-                              ? 'bg-[#E3F3EB] border-[#98DEC2] text-[#134B35]'
-                              : 'bg-[#F8FBF9] border-[#E2EFE8] text-[#4E645A]'
-                          }`}
-                        >
-                          <span
-                            className={`w-4 h-4 rounded-md flex items-center justify-center text-[10px] font-black shrink-0 ${
-                              checked
-                                ? 'bg-[#1A5D42] text-white'
-                                : 'border border-[#B5C9BF] bg-white text-transparent'
-                            }`}
-                          >
-                            ✓
-                          </span>
-                          <span
-                            className={`text-[11.5px] font-extrabold leading-tight ${
-                              checked ? 'line-through opacity-80' : ''
-                            }`}
-                          >
-                            {item.label}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* 4. 🗣️ 旅途實用「手指日語」溝通大字卡 (點擊放大給店員看) */}
-                <div className="bg-white rounded-[26px] p-4 shadow-sm border border-[#E2EFE8] space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="text-[15px] font-extrabold text-[#162921] flex items-center gap-2">
-                      <span>🗣️</span>
-                      <span>手指日語溝通卡（點擊放大）</span>
-                    </div>
-                    <span className="text-[10.5px] font-bold text-[#647A70]">離線可用</span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    {[
-                      {
-                        tag: '🛍️ 免稅退稅',
-                        zh: '請問可以辦理免稅嗎？',
-                        jp: '免税（めんぜい）できますか？',
-                        romaji: 'Menzei dekimasu ka?',
-                      },
-                      {
-                        tag: '🍜 餐廳點餐',
-                        zh: '請給我推薦的人氣餐點！',
-                        jp: 'おすすめのメニューをください！',
-                        romaji: 'Osusume no menyū o kudasai!',
-                      },
-                      {
-                        tag: '💳 結帳付款',
-                        zh: '請問可以使用 ICOCA / 信用卡嗎？',
-                        jp: 'ICOCAやクレジットカードは使えますか？',
-                        romaji: 'ICOCA ya kurejitto kādo wa tsukaemasu ka?',
-                      },
-                      {
-                        tag: '🚉 車站問路',
-                        zh: '請問去這個地址要往哪裡走？',
-                        jp: 'すみません、この場所へはどう行けばいいですか？',
-                        romaji: 'Sumimasen, kono basho e wa dō ikeba ii desu ka?',
-                      },
-                    ].map((phrase) => (
-                      <button
-                        key={phrase.tag}
-                        type="button"
-                        onClick={() => setActivePhraseModal(phrase)}
-                        className="p-3 rounded-2xl bg-[#FDF6F3] hover:bg-[#FCEBE4] border border-[#F5DCD2] text-left transition"
-                      >
-                        <div className="text-[10.5px] font-extrabold text-[#B8431F]">
-                          {phrase.tag}
-                        </div>
-                        <div className="text-[12px] font-extrabold text-[#14241D] mt-0.5 line-clamp-1">
-                          {phrase.zh}
-                        </div>
-                        <div className="text-[10.5px] text-[#6E5D54] truncate mt-0.5">
-                          {phrase.jp}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
                 </div>
               </div>
             </div>
@@ -3958,7 +4645,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 3. 📄 匯入「文字.txt」或從另一個 PWA 貼上地點 JSON 視窗 */}
+      {/* 3. 📄 Amazing Location 專屬對接匯入視窗 (支援長按貼上瞬間自動匯入、同網域自動偵測、文字.txt 檔案上傳) */}
       {showImportJsonModal && (
         <div
           className="fixed inset-0 z-[200] bg-black/55 backdrop-blur-xs flex items-center justify-center p-4"
@@ -3971,20 +4658,41 @@ export default function App() {
             <div className="flex items-center justify-between border-b border-[#EBF3EE] pb-2.5">
               <div>
                 <h3 className="text-base font-extrabold text-[#14241D]">
-                  📥 匯入目的地清單 (支援「文字.txt」格式)
+                  📥 匯入 Amazing Location 景點資料
                 </h3>
                 <p className="text-[11px] text-[#5B7368]">
-                  可從另一個 Location PWA 貼上 JSON 陣列，或直接上傳 .txt / .json 檔案
+                  在「Amazing Location」點選「✈️ 傳送到 Trip Plan」複製後，於下方框內點「貼上」即可自動匯入（完整保留城市、區域與 #標籤）
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setShowImportJsonModal(false)}
-                className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center"
+                className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {/* 若偵測到同網域有 amazing_locations LocalStorage，提供一鍵直接同步 */}
+            {readSameOriginAmazingLocations().length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  const localPlaces = readSameOriginAmazingLocations();
+                  const ok = parseAndImportPlacesArray(localPlaces);
+                  if (ok) {
+                    setShowImportJsonModal(false);
+                    navigateToTab('plan');
+                  }
+                }}
+                className="w-full py-2.5 px-3 rounded-2xl bg-[#DBEAFE] hover:bg-[#BFDBFE] text-[#1E40AF] text-xs font-extrabold flex items-center justify-center gap-1.5 border border-[#93C5FD] transition"
+              >
+                <span>🔗</span>
+                <span>
+                  偵測到本機 Amazing Location 清單 ({readSameOriginAmazingLocations().length} 個地點)，點此直接同步
+                </span>
+              </button>
+            )}
 
             <div className="flex items-center justify-between gap-2">
               <button
@@ -3992,15 +4700,16 @@ export default function App() {
                 onClick={() => {
                   parseAndImportPlacesArray(SAMPLE_LOCATION_TXT_DATA);
                   setShowImportJsonModal(false);
+                  navigateToTab('plan');
                 }}
                 className="flex-1 py-2 px-3 rounded-xl bg-[#E3F2EA] hover:bg-[#cfe8db] text-[#165C3E] text-xs font-extrabold flex items-center justify-center gap-1.5 transition"
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>一鍵載入「文字.txt」範例 (3 筆台北美食)</span>
+                <span>載入「文字.txt」範例 (3 筆)</span>
               </button>
 
               <label className="py-2 px-3 rounded-xl bg-[#FADBD0] hover:bg-[#f5c7b8] text-[#A83815] text-xs font-extrabold cursor-pointer shrink-0 transition">
-                📂 選擇 .txt 檔案
+                📂 上傳 .txt / .json 檔
                 <input
                   type="file"
                   accept=".txt,.json,application/json,text/plain"
@@ -4012,14 +4721,11 @@ export default function App() {
                     reader.onload = (ev) => {
                       const content = String(ev.target?.result || '');
                       setImportJsonText(content);
-                      try {
-                        const parsed = JSON.parse(content);
-                        if (Array.isArray(parsed)) {
-                          parseAndImportPlacesArray(parsed);
-                          setShowImportJsonModal(false);
-                        }
-                      } catch {
-                        showToast('⚠️ 檔案內容非標準 JSON，請檢查下方文字框');
+                      const ok = handleUniversalImport(content);
+                      if (ok) {
+                        setImportJsonText('');
+                        setShowImportJsonModal(false);
+                        navigateToTab('plan');
                       }
                     };
                     reader.readAsText(file);
@@ -4028,13 +4734,32 @@ export default function App() {
               </label>
             </div>
 
-            <textarea
-              rows={6}
-              value={importJsonText}
-              onChange={(e) => setImportJsonText(e.target.value)}
-              placeholder='貼上 JSON 內容，例如：[{"id":"ChIJ...","displayName":{"text":"王師父脆皮豬｜台北大同區美食"},"formattedAddress":"..."}]'
-              className="w-full p-3 rounded-2xl bg-[#F4FAF6] border border-[#CFE3D8] text-xs font-mono text-[#14241D] focus:outline-none focus:border-[#1A5D42]"
-            />
+            <div className="space-y-1">
+              <label className="text-[11px] font-extrabold text-[#1A5D42] block">
+                👇 手機請點一下下方輸入框並按「貼上 (Paste)」，貼上瞬間即自動匯入：
+              </label>
+              <textarea
+                rows={6}
+                autoFocus
+                value={importJsonText}
+                onChange={(e) => setImportJsonText(e.target.value)}
+                onPaste={(e) => {
+                  const pasted = e.clipboardData?.getData('text');
+                  if (pasted && pasted.trim()) {
+                    e.preventDefault();
+                    setImportJsonText(pasted);
+                    const ok = handleUniversalImport(pasted);
+                    if (ok) {
+                      setImportJsonText('');
+                      setShowImportJsonModal(false);
+                      navigateToTab('plan');
+                    }
+                  }
+                }}
+                placeholder={'長按此處選擇「貼上」：\n支援 Amazing Location 匯出的 JSON 陣列（含 customName、customCity、customArea、customTags、addressComponents）'}
+                className="w-full p-3 rounded-2xl bg-[#F4FAF6] border-2 border-[#68C39F] text-xs font-mono text-[#14241D] focus:outline-none focus:border-[#1A5D42]"
+              />
+            </div>
 
             <div className="flex gap-2">
               <button
@@ -4047,17 +4772,11 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  try {
-                    const parsed = JSON.parse(importJsonText);
-                    if (Array.isArray(parsed)) {
-                      parseAndImportPlacesArray(parsed);
-                      setImportJsonText('');
-                      setShowImportJsonModal(false);
-                    } else {
-                      showToast('⚠️ JSON 需為陣列格式 [...]');
-                    }
-                  } catch {
-                    showToast('⚠️ JSON 解析失敗，請確認格式是否完整');
+                  const ok = handleUniversalImport(importJsonText);
+                  if (ok) {
+                    setImportJsonText('');
+                    setShowImportJsonModal(false);
+                    navigateToTab('plan');
                   }
                 }}
                 className="flex-1 py-2.5 rounded-xl bg-[#1A5D42] text-white text-xs font-extrabold shadow-md"
@@ -4069,7 +4788,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 4. ✏️ 更改景點名稱彈窗 */}
+      {/* 4. ✏️ 編輯地點資訊彈窗 (1:1 對應 Amazing Location 的 4 欄位編輯：店名 / 城市 / 區域 / 自訂標籤) */}
       {renameModalDest && (
         <div
           className="fixed inset-0 z-[200] bg-black/55 backdrop-blur-xs flex items-center justify-center p-4"
@@ -4078,27 +4797,70 @@ export default function App() {
           <form
             onSubmit={handleConfirmRename}
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-xs bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3"
+            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3.5"
           >
-            <h3 className="text-base font-extrabold text-[#14241D]">✏️ 更改景點名稱</h3>
-            <input
-              type="text"
-              autoFocus
-              value={renameInputVal}
-              onChange={(e) => setRenameInputVal(e.target.value)}
-              className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4FAF6] border border-[#CFE3D8] text-sm font-bold focus:outline-none focus:border-[#1A5D42]"
-            />
-            <div className="flex gap-2">
+            <h3 className="text-lg font-extrabold text-[#14241D]">✏️ 編輯地點資訊</h3>
+
+            <div>
+              <label className="block text-xs text-[#4A6357] mb-1 font-bold">
+                店名 / 景點名稱
+              </label>
+              <input
+                type="text"
+                autoFocus
+                value={renameInputVal}
+                onChange={(e) => setRenameInputVal(e.target.value)}
+                className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4FAF6] border border-[#CFE3D8] text-sm font-bold focus:outline-none focus:border-[#1A5D42]"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-xs text-[#4A6357] mb-1 font-bold">城市</label>
+                <input
+                  type="text"
+                  value={editDestCityVal}
+                  onChange={(e) => setEditDestCityVal(e.target.value)}
+                  placeholder="例如：大阪、京都"
+                  className="w-full px-3 py-2 rounded-xl bg-[#F4FAF6] border border-[#CFE3D8] text-xs font-bold focus:outline-none focus:border-[#1A5D42]"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#4A6357] mb-1 font-bold">區域 (商圈)</label>
+                <input
+                  type="text"
+                  value={editDestAreaVal}
+                  onChange={(e) => setEditDestAreaVal(e.target.value)}
+                  placeholder="例如：梅田、難波"
+                  className="w-full px-3 py-2 rounded-xl bg-[#F4FAF6] border border-[#CFE3D8] text-xs font-bold focus:outline-none focus:border-[#1A5D42]"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs text-[#4A6357] mb-1 font-bold">
+                自訂標籤 (用逗號分隔)
+              </label>
+              <input
+                type="text"
+                value={editDestTagsVal}
+                onChange={(e) => setEditDestTagsVal(e.target.value)}
+                placeholder="例如：餐廳, 拉麵, 必去"
+                className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#CFE3D8] text-xs font-bold focus:outline-none focus:border-[#1A5D42]"
+              />
+            </div>
+
+            <div className="flex gap-2 pt-1">
               <button
                 type="button"
                 onClick={() => setRenameModalDest(null)}
-                className="flex-1 py-2 rounded-xl bg-[#EEF5F1] text-[#496357] text-xs font-extrabold"
+                className="flex-1 py-2.5 rounded-xl bg-[#EEF5F1] text-[#496357] text-xs font-extrabold"
               >
                 取消
               </button>
               <button
                 type="submit"
-                className="flex-1 py-2 rounded-xl bg-[#1A5D42] text-white text-xs font-extrabold"
+                className="flex-1 py-2.5 rounded-xl bg-[#1A5D42] text-white text-xs font-extrabold"
               >
                 儲存變更
               </button>
@@ -4226,7 +4988,206 @@ export default function App() {
         </div>
       )}
 
-      {/* 6. 住宿編輯 Modal */}
+      {/* 5B. ✏️ 修改消費紀錄 Modal（支援快速增減數量 ×N 與修正價錢/幣別/類別） */}
+      {editingExpense && (
+        <div
+          className="fixed inset-0 z-[160] bg-black/55 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setEditingExpense(null)}
+        >
+          <form
+            onSubmit={handleEditExpenseSubmit}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3.5"
+          >
+            <div className="flex items-center justify-between border-b border-[#EBF3EE] pb-2.5">
+              <div>
+                <h3 className="text-lg font-extrabold text-[#14241D]">✏️ 修改消費項目與價錢</h3>
+                <p className="text-[11px] text-[#5B7368]">
+                  可快速調整數量（自動換算總價）或直接修改金額
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingExpense(null)}
+                className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* 項目名稱 + 數量調整器 */}
+            <div className="grid grid-cols-3 gap-2.5">
+              <div className="col-span-2">
+                <label className="text-xs font-bold text-[#4A6357] block mb-1">
+                  消費項目名稱 *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editExpForm.baseTitle}
+                  onChange={(e) =>
+                    setEditExpForm({ ...editExpForm, baseTitle: e.target.value })
+                  }
+                  placeholder="例如：宇治抹茶芭菲"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold focus:outline-none focus:border-[#1D6B4B]"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-[#4A6357] block mb-1">
+                  數量 (×{editExpForm.quantity})
+                </label>
+                <div className="flex items-center justify-between rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] px-1.5 py-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleEditExpenseQtyChange(-1)}
+                    className="w-7 h-7 rounded-lg bg-white hover:bg-[#E2EFE8] text-[#14241D] font-black text-sm shadow-2xs transition"
+                  >
+                    −
+                  </button>
+                  <span className="text-sm font-black text-[#1A5D42] tabular-nums">
+                    {editExpForm.quantity}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleEditExpenseQtyChange(1)}
+                    className="w-7 h-7 rounded-lg bg-[#1A5D42] hover:bg-[#134631] text-white font-black text-sm shadow-2xs transition"
+                  >
+                    ＋
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* 總金額 + 幣別 + 快速微調按鈕 */}
+            <div className="space-y-1.5">
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="text-xs font-bold text-[#4A6357] block mb-1">
+                    總金額 *
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    min="0"
+                    step="any"
+                    value={editExpForm.amount}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const num = Number(val) || 0;
+                      setEditExpForm((prev) => ({
+                        ...prev,
+                        amount: val,
+                        unitAmount: prev.quantity > 0 ? num / prev.quantity : num,
+                      }));
+                    }}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-black tabular-nums focus:outline-none focus:border-[#1D6B4B]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-[#4A6357] block mb-1">付款幣別</label>
+                  <select
+                    value={editExpForm.currency}
+                    onChange={(e) =>
+                      setEditExpForm({ ...editExpForm, currency: e.target.value })
+                    }
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold focus:outline-none"
+                  >
+                    {CURRENCIES.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.flag} {c.code} ({c.symbol})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* 價錢快速加減按鈕 */}
+              <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                {[-500, -100, +100, +500, +1000].map((diff) => (
+                  <button
+                    key={diff}
+                    type="button"
+                    onClick={() =>
+                      setEditExpForm((prev) => {
+                        const nextAmt = Math.max(0, (Number(prev.amount) || 0) + diff);
+                        return {
+                          ...prev,
+                          amount: String(nextAmt),
+                          unitAmount: prev.quantity > 0 ? nextAmt / prev.quantity : nextAmt,
+                        };
+                      })
+                    }
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold transition ${
+                      diff < 0
+                        ? 'bg-[#FBE4DF] hover:bg-[#f5cfc6] text-[#B53D1B]'
+                        : 'bg-[#E3F2EA] hover:bg-[#cfe8db] text-[#165C3E]'
+                    }`}
+                  >
+                    {diff > 0 ? `+${diff}` : diff}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 消費類別 */}
+            <div>
+              <label className="text-xs font-bold text-[#4A6357] block mb-1">消費類別</label>
+              <div className="grid grid-cols-2 gap-2">
+                {EXPENSE_CATEGORIES.map((cat) => (
+                  <button
+                    key={cat.key}
+                    type="button"
+                    onClick={() => setEditExpForm({ ...editExpForm, category: cat.key })}
+                    className={`py-2 px-3 rounded-xl text-xs font-extrabold border text-left transition ${
+                      editExpForm.category === cat.key
+                        ? 'bg-[#1A5D42] text-white border-[#1A5D42]'
+                        : 'bg-[#F4FAF6] text-[#284538] border-[#DCEAE2]'
+                    }`}
+                  >
+                    {cat.zhTitle}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 店家或備註 */}
+            <div>
+              <label className="text-xs font-bold text-[#4A6357] block mb-1">
+                店家或備註 (選填)
+              </label>
+              <input
+                type="text"
+                value={editExpForm.shopOrNote}
+                onChange={(e) =>
+                  setEditExpForm({ ...editExpForm, shopOrNote: e.target.value })
+                }
+                placeholder="例如：祇園辻利、Don Quijote..."
+                className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm focus:outline-none"
+              />
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setEditingExpense(null)}
+                className="flex-1 py-2.5 rounded-xl bg-[#EEF5F1] text-[#496357] font-bold text-sm"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                className="flex-1 py-2.5 rounded-xl bg-[#1A5D42] hover:bg-[#134631] text-white font-extrabold text-sm shadow-md"
+              >
+                儲存修改
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* 6. 住宿編輯 Modal (支援輸入飯店名稱後自動搜尋地址 + 多個分館選擇卡片) */}
       {showStayModal && (
         <div
           className="fixed inset-0 z-[150] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
@@ -4234,31 +5195,127 @@ export default function App() {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3"
+            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3 max-h-[90vh] overflow-y-auto tabi-scroll"
           >
             <div className="flex items-center justify-between border-b border-[#EBF3EE] pb-2">
-              <h3 className="text-lg font-extrabold text-[#14241D]">🏨 編輯住宿資訊</h3>
+              <div>
+                <h3 className="text-lg font-extrabold text-[#14241D]">🏨 編輯住宿資訊</h3>
+                <p className="text-[11px] text-[#5B7368]">
+                  輸入飯店名稱後可自動檢索地址；若有多間分館會跳出選擇卡片
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => setShowStayModal(false)}
-                className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center"
+                className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <div>
-              <label className="text-xs font-bold text-[#4A6357] block mb-1">飯店名稱</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-bold text-[#4A6357]">飯店名稱</label>
+                <button
+                  type="button"
+                  disabled={isSearchingHotelAddress}
+                  onClick={() => handleSearchHotelAddress()}
+                  className="px-2.5 py-1 rounded-lg bg-[#E3F2EA] hover:bg-[#CFE8DB] text-[#165C3E] text-[11px] font-extrabold flex items-center gap-1 transition disabled:opacity-50"
+                >
+                  {isSearchingHotelAddress ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Search className="w-3 h-3" />
+                  )}
+                  <span>{isSearchingHotelAddress ? '搜尋地址中...' : '自動搜尋地址'}</span>
+                </button>
+              </div>
               <input
                 type="text"
                 value={state.stay.hotelName}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setState((prev) => ({
+                    ...prev,
+                    stay: { ...prev.stay, hotelName: val },
+                  }));
+                }}
+                onBlur={() => {
+                  if (state.stay.hotelName.trim().length >= 2 && !state.stay.address.trim()) {
+                    handleSearchHotelAddress(state.stay.hotelName);
+                  }
+                }}
+                placeholder="例如：APA Hotel 京都、東橫INN、The Gate Hotel..."
+                className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
+              />
+            </div>
+
+            {/* 若發現多個分館或多個符合地址，跳出選擇卡片 */}
+            {hotelCandidates.length > 0 && (
+              <div className="p-3 rounded-2xl bg-[#FFF6F2] border border-[#F5D0C1] space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11.5px] font-extrabold text-[#B8431F]">
+                    📍 找到 {hotelCandidates.length} 個相關飯店地址，請點選分館：
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setHotelCandidates([])}
+                    className="text-[10.5px] font-bold text-[#7A6258] hover:underline"
+                  >
+                    收起
+                  </button>
+                </div>
+                <div className="space-y-1.5 max-h-44 overflow-y-auto tabi-scroll pr-0.5">
+                  {hotelCandidates.map((cand) => (
+                    <button
+                      key={cand.id}
+                      type="button"
+                      onClick={() => {
+                        setState((prev) => ({
+                          ...prev,
+                          stay: {
+                            ...prev.stay,
+                            hotelName: cand.name,
+                            address: cand.address,
+                          },
+                        }));
+                        setHotelCandidates([]);
+                        showToast(`✅ 已套用「${cand.name}」的地址！`);
+                      }}
+                      className="w-full p-2.5 rounded-xl bg-white hover:bg-[#EAF4EF] border border-[#E6D5CE] hover:border-[#1A5D42] text-left transition group"
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-xs font-extrabold text-[#14241D] group-hover:text-[#1A5D42] truncate">
+                          {cand.name}
+                        </span>
+                        {cand.branchNote && (
+                          <span className="px-1.5 py-0.5 rounded-md bg-[#E3F2EA] text-[#165C3E] text-[9.5px] font-extrabold shrink-0">
+                            {cand.branchNote}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-[#5B7368] mt-0.5 leading-snug">
+                        {cand.address}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="text-xs font-bold text-[#4A6357] block mb-1">地址 (可自動帶入或手動微調)</label>
+              <input
+                type="text"
+                value={state.stay.address}
                 onChange={(e) =>
                   setState((prev) => ({
                     ...prev,
-                    stay: { ...prev.stay, hotelName: e.target.value },
+                    stay: { ...prev.stay, address: e.target.value },
                   }))
                 }
-                className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
+                placeholder="輸入飯店名稱後點擊「自動搜尋地址」即可自動填寫"
+                className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-semibold"
               />
             </div>
 
@@ -4309,14 +5366,16 @@ export default function App() {
             </div>
 
             <div>
-              <label className="text-xs font-bold text-[#4A6357] block mb-1">地址</label>
+              <label className="text-xs font-bold text-[#4A6357] block mb-1">
+                💡 住宿小貼士 (中文備註)
+              </label>
               <input
                 type="text"
-                value={state.stay.address}
+                value={state.stay.insiderScoop}
                 onChange={(e) =>
                   setState((prev) => ({
                     ...prev,
-                    stay: { ...prev.stay, address: e.target.value },
+                    stay: { ...prev.stay, insiderScoop: e.target.value },
                   }))
                 }
                 className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs"
@@ -4334,7 +5393,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 7. 目的地與旅行起訖日期編輯 Modal */}
+      {/* 7. 目的地與旅行起訖日期編輯 Modal (輸入目的地後自動尋找合適封面圖片) */}
       {showTripModal && (
         <div
           className="fixed inset-0 z-[150] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
@@ -4345,7 +5404,12 @@ export default function App() {
             className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3"
           >
             <div className="flex items-center justify-between border-b border-[#EBF3EE] pb-2">
-              <h3 className="text-lg font-extrabold text-[#14241D]">✈️ 編輯旅程與起訖日期</h3>
+              <div>
+                <h3 className="text-lg font-extrabold text-[#14241D]">✈️ 編輯旅程與起訖日期</h3>
+                <p className="text-[11px] text-[#5B7368]">
+                  修改目的地後將自動為您搜尋匹配的風景封面圖
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => setShowTripModal(false)}
@@ -4356,7 +5420,22 @@ export default function App() {
             </div>
 
             <div>
-              <label className="text-xs font-bold text-[#4A6357] block mb-1">目的地城市 / 國家</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-bold text-[#4A6357]">目的地城市 / 國家</label>
+                <button
+                  type="button"
+                  disabled={isSearchingHeroPhoto}
+                  onClick={() => handleAutoFindTripHeroPhoto(state.trip.destinationTitle)}
+                  className="px-2.5 py-1 rounded-lg bg-[#E3F2EA] hover:bg-[#CFE8DB] text-[#165C3E] text-[11px] font-extrabold flex items-center gap-1 transition disabled:opacity-50"
+                >
+                  {isSearchingHeroPhoto ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <ImageIcon className="w-3 h-3" />
+                  )}
+                  <span>{isSearchingHeroPhoto ? '搜尋圖片中...' : '自動尋找封面圖'}</span>
+                </button>
+              </div>
               <input
                 type="text"
                 value={state.trip.destinationTitle}
@@ -4366,6 +5445,7 @@ export default function App() {
                     trip: { ...prev.trip, destinationTitle: e.target.value },
                   }))
                 }
+                placeholder="例如：Kyoto, Japan、東京、大阪、台北、首爾..."
                 className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
               />
             </div>
@@ -4437,10 +5517,13 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => setShowTripModal(false)}
+              onClick={async () => {
+                setShowTripModal(false);
+                await handleAutoFindTripHeroPhoto(state.trip.destinationTitle);
+              }}
               className="w-full py-2.5 rounded-xl bg-[#1A5D42] text-white font-extrabold text-sm"
             >
-              儲存變更
+              儲存變更並自動配圖
             </button>
           </div>
         </div>
@@ -4629,7 +5712,7 @@ export default function App() {
                 }}
                 className="w-full py-2.5 rounded-xl bg-[#FADBD0] hover:bg-[#f4c9b9] text-[#A83815] text-xs font-extrabold"
               >
-                📋 匯入 Location 資料 (支援「文字.txt」格式)
+                📋 跨 PWA 匯入景點清單 (支援 JSON / 文字.txt)
               </button>
             </div>
           </div>
@@ -4647,7 +5730,7 @@ export default function App() {
         }}
       />
 
-      {/* 13. 🗣️ 手指日語溝通放大卡 Modal */}
+      {/* 13. 🗣️ 手指日語 / 英語溝通放大卡 Modal */}
       {activePhraseModal && (
         <div
           className="fixed inset-0 z-[220] bg-black/65 backdrop-blur-xs flex items-center justify-center p-4"
@@ -4657,17 +5740,66 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
             className="w-full max-w-sm bg-white rounded-3xl p-6 shadow-2xl border border-[#DCEAE2] text-center space-y-4"
           >
-            <div className="inline-block px-3 py-1 rounded-full bg-[#FCE3DA] text-[#B83E1B] text-xs font-extrabold">
-              {activePhraseModal.tag} · 請出示給店員看
+            <div className="flex items-center justify-between gap-2">
+              <span className="inline-block px-3 py-1 rounded-full bg-[#FCE3DA] text-[#B83E1B] text-xs font-extrabold">
+                {activePhraseModal.tag} · 請出示給店員看
+              </span>
+              <div className="inline-flex items-center rounded-full bg-[#EDF6F1] p-0.5 border border-[#CFE4D8]">
+                <button
+                  type="button"
+                  onClick={() => setPhraseLang('jp')}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold transition ${
+                    phraseLang === 'jp'
+                      ? 'bg-[#1A5D42] text-white'
+                      : 'text-[#4A6357]'
+                  }`}
+                >
+                  🇯🇵 日語
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPhraseLang('en')}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold transition ${
+                    phraseLang === 'en'
+                      ? 'bg-[#1A5D42] text-white'
+                      : 'text-[#4A6357]'
+                  }`}
+                >
+                  🇬🇧 英語
+                </button>
+              </div>
             </div>
-            <div className="text-[26px] font-black text-[#14241D] leading-snug py-2">
-              {activePhraseModal.jp}
-            </div>
-            <div className="text-xs font-bold text-[#1A5D42] bg-[#EAF4EF] py-2 px-3 rounded-xl">
-              發音：{activePhraseModal.romaji}
-            </div>
-            <div className="text-sm font-bold text-[#5D4C44]">
-              中文：{activePhraseModal.zh}
+
+            {phraseLang === 'jp' ? (
+              <>
+                <div className="text-[25px] font-black text-[#14241D] leading-snug py-2">
+                  {activePhraseModal.jp}
+                </div>
+                <div className="text-xs font-bold text-[#1A5D42] bg-[#EAF4EF] py-2 px-3 rounded-xl">
+                  發音：{activePhraseModal.romaji}
+                </div>
+                <div className="p-2.5 rounded-xl bg-[#F8FBF9] border border-[#E2EFE8] text-xs font-bold text-[#4A6357] flex items-center justify-center gap-1.5">
+                  <Globe className="w-3.5 h-3.5 text-[#1A5D42] shrink-0" />
+                  <span>English: {activePhraseModal.en}</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-[24px] font-black text-[#14241D] leading-snug py-2">
+                  {activePhraseModal.en}
+                </div>
+                <div className="text-xs font-bold text-[#1A5D42] bg-[#EAF4EF] py-2 px-3 rounded-xl">
+                  {activePhraseModal.enSub}
+                </div>
+                <div className="p-2.5 rounded-xl bg-[#F8FBF9] border border-[#E2EFE8] text-xs font-bold text-[#4A6357] flex items-center justify-center gap-1.5">
+                  <Globe className="w-3.5 h-3.5 text-[#1A5D42] shrink-0" />
+                  <span>日本語：{activePhraseModal.jp}</span>
+                </div>
+              </>
+            )}
+
+            <div className="text-sm font-extrabold text-[#5D4C44]">
+              中文意思：{activePhraseModal.zh}
             </div>
             <button
               type="button"

@@ -10,16 +10,16 @@
   "theme_color": "#EAF3EE",
   "icons": [
     {
-      "src": "/icon-192.png",
+      "src": "/assets/aistudio/amazing-travel-icon_eef69a7f.png",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any"
+      "purpose": "any maskable"
     },
     {
-      "src": "/icon-512.png",
+      "src": "/assets/aistudio/amazing-travel-icon_eef69a7f.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any"
+      "purpose": "any maskable"
     }
   ]
 }

@@ -39,9 +39,31 @@ export function usePWAInstall() {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    // Ensure fallback Service Worker registration if not already controlled
+    // 清除舊版曾快取到 .vite/deps 的舊快取池，並更新 Service Worker
+    if ('caches' in window) {
+      caches
+        .keys()
+        .then((keys) => {
+          keys.forEach((key) => {
+            if (key !== 'tabi-amazing-travel-v4') {
+              caches.delete(key).catch(() => {});
+            }
+          });
+        })
+        .catch(() => {});
+    }
+
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      if (import.meta.env.DEV) {
+        navigator.serviceWorker
+          .getRegistrations()
+          .then((regs) => {
+            regs.forEach((reg) => reg.update().catch(() => {}));
+          })
+          .catch(() => {});
+      } else {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      }
     }
 
     return () => {
