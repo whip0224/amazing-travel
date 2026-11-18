@@ -68,6 +68,7 @@ import {
 import { usePWAInstall } from './hooks/usePWAInstall';
 import { IntegrationGuideModal } from './components/IntegrationGuideModal';
 import { AirportSearchModal, type AirportTargetSlot } from './components/AirportSearchModal';
+import { formatFlightDateLabel } from './utils/flightLookup';
 import { findDestinationPhoto } from './utils/photoFinder';
 import {
   optimizeItineraryWithAI,
@@ -84,6 +85,12 @@ import {
   getCuratedGemsForDestination,
   getTreatsForDestination,
 } from './utils/destinationRecommendations';
+import {
+  checkGeminiStatus,
+  scanReceiptWithGemini,
+  generateSmartPhraseWithGemini,
+  type ScannedReceiptResult,
+} from './utils/geminiClient';
 
 // --- Firebase 初始化 (保留原有專案雲端連線架構) ---
 const firebaseConfig = {
@@ -522,6 +529,135 @@ export default function App() {
     setTimeout(() => {
       setToastMessage((prev) => (prev === msg ? null : prev));
     }, 3000);
+  };
+
+  // --- 🤖 Gemini AI 狀態、拍收據自動記帳、AI 情境溝通卡與缺少 API Key 提示 ---
+  const [geminiConfigured, setGeminiConfigured] = useState<boolean | null>(null);
+  const [missingApiKeyModalMsg, setMissingApiKeyModalMsg] = useState<string | null>(null);
+  const [isScanningReceipt, setIsScanningReceipt] = useState<boolean>(false);
+  const [scannedReceiptData, setScannedReceiptData] = useState<ScannedReceiptResult | null>(null);
+  const [scannedReceiptPreviewUrl, setScannedReceiptPreviewUrl] = useState<string | null>(null);
+  const [customPhraseInput, setCustomPhraseInput] = useState<string>('');
+  const [isGeneratingPhrase, setIsGeneratingPhrase] = useState<boolean>(false);
+  const [customPhrases, setCustomPhrases] = useState<PhraseCardItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('tabi_custom_phrases_v1');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    checkGeminiStatus().then((status) => {
+      setGeminiConfigured(status.configured);
+    });
+  }, []);
+
+  const handleScanReceiptFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setIsScanningReceipt(true);
+    try {
+      const res = await scanReceiptWithGemini(file);
+      if (!res.ok || !res.data) {
+        setMissingApiKeyModalMsg(
+          res.errorMessage ||
+            '尚未設定 Gemini API Key，因此無法使用「AI 拍收據／菜單辨識記帳」功能。您仍可使用下方的手動快速記帳（100% 支援離線）。'
+        );
+        return;
+      }
+      setGeminiConfigured(true);
+      setScannedReceiptData(res.data);
+      setScannedReceiptPreviewUrl(res.previewDataUrl || null);
+    } finally {
+      setIsScanningReceipt(false);
+    }
+  };
+
+  const handleConfirmScannedReceipt = () => {
+    if (!scannedReceiptData || !Array.isArray(scannedReceiptData.items)) return;
+    const nowStr = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    const cur = (scannedReceiptData.currency || 'JPY').toUpperCase();
+    const addedExpenses: ExpenseItem[] = scannedReceiptData.items.map((it, idx) => {
+      const qty = Math.max(1, Number(it.quantity) || 1);
+      const origAmt = Math.max(0, Number(it.amount) || 0);
+      const jpyAmt = Math.round(convertAmount(origAmt, cur, 'JPY'));
+      const validCat: ExpenseCategoryKey =
+        it.category === 'shopping' ||
+        it.category === 'dining' ||
+        it.category === 'transport' ||
+        it.category === 'gifts'
+          ? it.category
+          : 'shopping';
+      const displayTitle = qty > 1 && !it.title.includes('×') ? `${it.title} × ${qty}` : it.title;
+      return {
+        id: `exp-ai-${Date.now()}-${idx}`,
+        title: displayTitle,
+        shopOrNote: scannedReceiptData.shopName || 'AI 收據辨識',
+        amountJPY: jpyAmt,
+        originalAmount: origAmt,
+        originalCurrency: cur,
+        category: validCat,
+        createdAt: nowStr,
+        quantity: qty,
+        photoUrl: scannedReceiptPreviewUrl || undefined,
+      };
+    });
+
+    if (addedExpenses.length > 0) {
+      setState((prev) => ({
+        ...prev,
+        expenses: [...addedExpenses, ...prev.expenses],
+      }));
+      setShowExpenseDetailList(true);
+      showToast(`🧾 AI 已成功匯入 ${addedExpenses.length} 筆收據消費項目！`);
+    }
+    setScannedReceiptData(null);
+    setScannedReceiptPreviewUrl(null);
+  };
+
+  const handleGenerateCustomPhrase = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const q = customPhraseInput.trim();
+    if (!q) {
+      showToast('⚠️ 請先輸入想詢問店員或翻譯的溝通情境');
+      return;
+    }
+    setIsGeneratingPhrase(true);
+    try {
+      const res = await generateSmartPhraseWithGemini(q);
+      if (!res.ok || !res.data) {
+        setMissingApiKeyModalMsg(
+          res.errorMessage ||
+            '尚未設定 Gemini API Key，因此無法使用「AI 即時生成溝通卡」功能。下方內建的常用日語／英語溝通卡仍可 100% 離線使用。'
+        );
+        return;
+      }
+      setGeminiConfigured(true);
+      const newCard: PhraseCardItem = {
+        tag: `${res.data.emoji || '✨'} AI 情境卡`,
+        zh: res.data.zh || q,
+        jp: res.data.jp,
+        romaji: res.data.romaji,
+        en: res.data.en,
+        enSub: res.data.zh || q,
+      };
+      const updated = [newCard, ...customPhrases.slice(0, 11)];
+      setCustomPhrases(updated);
+      try {
+        localStorage.setItem('tabi_custom_phrases_v1', JSON.stringify(updated));
+      } catch {
+        // ignore storage errors
+      }
+      setCustomPhraseInput('');
+      setActivePhraseModal(newCard);
+      showToast('✨ AI 已為您生成專屬溝通大字卡！');
+    } finally {
+      setIsGeneratingPhrase(false);
+    }
   };
 
   // --- 🗓️ 根據使用者設定的 Start Date 與 End Date 動態產生旅行天數 ---
@@ -2616,10 +2752,36 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* ✨ Gemini AI 即時情境溝通卡生成列 */}
+                  <form
+                    onSubmit={handleGenerateCustomPhrase}
+                    className="flex items-center gap-1.5 bg-[#F4FAF6] p-1.5 rounded-2xl border border-[#CFE3D8]"
+                  >
+                    <input
+                      type="text"
+                      value={customPhraseInput}
+                      onChange={(e) => setCustomPhraseInput(e.target.value)}
+                      placeholder="輸入突發情境（如：這件有新的M號嗎？可退稅嗎？）..."
+                      className="flex-1 min-w-0 px-2.5 py-1.5 bg-transparent text-xs font-bold text-[#14241D] placeholder:text-[#758C81] focus:outline-none"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isGeneratingPhrase}
+                      className="px-3 py-1.5 rounded-xl bg-[#1A5D42] hover:bg-[#134631] text-white text-[11px] font-extrabold flex items-center gap-1 shrink-0 transition disabled:opacity-50"
+                    >
+                      {isGeneratingPhrase ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3.5 h-3.5" />
+                      )}
+                      <span>{isGeneratingPhrase ? 'AI 生成中' : 'AI 生成字卡'}</span>
+                    </button>
+                  </form>
+
                   <div className="grid grid-cols-2 gap-2">
-                    {COMMUNICATION_CARDS.map((phrase) => (
+                    {[...customPhrases, ...COMMUNICATION_CARDS].map((phrase, idx) => (
                       <button
-                        key={phrase.tag}
+                        key={`${phrase.tag}-${idx}`}
                         type="button"
                         onClick={() => setActivePhraseModal(phrase)}
                         className="p-3 rounded-2xl bg-[#FDF6F3] hover:bg-[#FCEBE4] border border-[#F5DCD2] text-left transition flex flex-col justify-between"
@@ -3171,15 +3333,6 @@ export default function App() {
                         <p className="text-[12px] text-[#665A54] truncate mt-0.5">
                           {state.stay.subTitle}
                         </p>
-
-                        <div className="flex flex-wrap items-center gap-1.5 mt-2">
-                          <span className="px-2.5 py-1 rounded-xl bg-[#DFF0E8] text-[#1D5E43] text-[11px] font-extrabold leading-tight">
-                            {state.stay.tag1} 🌊
-                          </span>
-                          <span className="px-2.5 py-1 rounded-xl bg-[#FDE7DD] text-[#B33F1B] text-[11px] font-extrabold leading-tight">
-                            {state.stay.tag2} 🥐
-                          </span>
-                        </div>
                       </div>
                     </div>
 
@@ -4028,7 +4181,29 @@ export default function App() {
                         4 類別
                       </span>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <label
+                        className={`px-2.5 py-1 rounded-full text-[11.5px] font-extrabold flex items-center gap-1 transition shadow-2xs cursor-pointer ${
+                          isScanningReceipt
+                            ? 'bg-[#1A5D42] text-white opacity-75 pointer-events-none'
+                            : 'bg-[#FCE3DA] hover:bg-[#f7d0c1] text-[#B83E1B] border border-[#F3C5B4]'
+                        }`}
+                        title="拍日本收據或菜單（自動縮小至 1200px 並由 Gemini AI 自動辨識品項與金額）"
+                      >
+                        {isScanningReceipt ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <span>📸</span>
+                        )}
+                        <span>{isScanningReceipt ? 'AI 辨識中...' : 'AI 拍收據'}</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          disabled={isScanningReceipt}
+                          onChange={handleScanReceiptFile}
+                        />
+                      </label>
                       <button
                         type="button"
                         onClick={() => setShowExpensePieChart((prev) => !prev)}
@@ -4635,6 +4810,8 @@ export default function App() {
         initialSlot={airportTargetSlot}
         outbound={state.outbound}
         inbound={state.inbound}
+        startDate={state.trip.startDate}
+        endDate={state.trip.endDate}
         airlineLabel={state.trip.airlineLabel}
         onSelectAirport={handleSelectAirportFromModal}
         onUpdateFlightMeta={handleUpdateFlightMeta}
@@ -5625,12 +5802,17 @@ export default function App() {
                   value={state.trip.startDate}
                   onChange={(e) => {
                     const nextStart = e.target.value;
+                    const nextOutboundDateLabel = formatFlightDateLabel(nextStart, 'outbound');
                     setState((prev) => ({
                       ...prev,
                       trip: {
                         ...prev.trip,
                         startDate: nextStart,
                         dateRangeLabel: formatTripDateRangeLabel(nextStart, prev.trip.endDate),
+                      },
+                      outbound: {
+                        ...prev.outbound,
+                        ...(nextOutboundDateLabel ? { dateLabel: nextOutboundDateLabel } : {}),
                       },
                     }));
                   }}
@@ -5646,12 +5828,17 @@ export default function App() {
                   value={state.trip.endDate}
                   onChange={(e) => {
                     const nextEnd = e.target.value;
+                    const nextInboundDateLabel = formatFlightDateLabel(nextEnd, 'inbound');
                     setState((prev) => ({
                       ...prev,
                       trip: {
                         ...prev.trip,
                         endDate: nextEnd,
                         dateRangeLabel: formatTripDateRangeLabel(prev.trip.startDate, nextEnd),
+                      },
+                      inbound: {
+                        ...prev.inbound,
+                        ...(nextInboundDateLabel ? { dateLabel: nextInboundDateLabel } : {}),
                       },
                     }));
                   }}
@@ -6058,6 +6245,19 @@ export default function App() {
                 </div>
               ) : (
                 <>
+                  {/* ⚠️ 若尚未設定 Gemini API Key，顯示提示並說明已自動使用離線引擎後備 */}
+                  {aiOptResult.missingApiKeyNotice && (
+                    <div className="p-3 rounded-2xl bg-[#FFF6ED] border border-[#F5D0A9] text-[#9A3412] space-y-1">
+                      <div className="text-xs font-extrabold flex items-center gap-1.5">
+                        <span>⚠️</span>
+                        <span>尚未設定 Gemini API Key，無法使用 Gemini AI 模型</span>
+                      </div>
+                      <p className="text-[11px] font-semibold leading-snug text-[#7C2D12]">
+                        {aiOptResult.missingApiKeyNotice}
+                      </p>
+                    </div>
+                  )}
+
                   {/* 優化成效摘要卡 */}
                   <div className="p-3.5 rounded-2xl bg-white border border-[#CDE3D7] shadow-2xs space-y-2">
                     <div className="flex items-center justify-between gap-2">
@@ -6156,6 +6356,145 @@ export default function App() {
                 <span>一鍵套用最佳化順序與時段</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 15. 📸 Gemini AI 收據／菜單辨識結果確認匯入 Modal */}
+      {scannedReceiptData && (
+        <div
+          className="fixed inset-0 z-[235] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setScannedReceiptData(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3.5 max-h-[88vh] flex flex-col overflow-hidden"
+          >
+            <div className="flex items-center justify-between border-b border-[#EBF3EE] pb-2.5">
+              <div>
+                <h3 className="text-base font-extrabold text-[#14241D]">
+                  📸 AI 收據／菜單辨識完成
+                </h3>
+                <p className="text-[11px] text-[#5B7368]">
+                  店家：{scannedReceiptData.shopName || '未命名店家'} ({scannedReceiptData.currency || 'JPY'})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setScannedReceiptData(null)}
+                className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {scannedReceiptData.summaryNote && (
+              <div className="p-2.5 rounded-xl bg-[#EAF4EF] border border-[#CFE3D8] text-[11px] font-bold text-[#1A5D42]">
+                💡 {scannedReceiptData.summaryNote}
+              </div>
+            )}
+
+            <div className="flex-1 overflow-y-auto space-y-2 tabi-scroll pr-1">
+              {scannedReceiptData.items.map((it, idx) => (
+                <div
+                  key={idx}
+                  className="p-2.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] flex items-center justify-between gap-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-extrabold text-[#14241D] truncate">
+                      {it.title} {it.quantity > 1 ? `× ${it.quantity}` : ''}
+                    </div>
+                    <div className="text-[10.5px] text-[#5B7368] font-bold">
+                      分類：
+                      {it.category === 'shopping'
+                        ? '🛍️ 購物'
+                        : it.category === 'dining'
+                        ? '🍜 飲食'
+                        : it.category === 'transport'
+                        ? '🚇 交通'
+                        : '🎁 手信'}
+                    </div>
+                  </div>
+                  <div className="text-xs font-black text-[#1A5D42] tabular-nums shrink-0">
+                    {scannedReceiptData.currency || 'JPY'} {Number(it.amount || 0).toLocaleString()}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setScannedReceiptData(null)}
+                className="flex-1 py-2.5 rounded-xl bg-[#EEF5F1] text-[#496357] font-bold text-xs"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmScannedReceipt}
+                className="flex-1 py-2.5 rounded-xl bg-[#1A5D42] hover:bg-[#134631] text-white font-extrabold text-xs shadow-md"
+              >
+                一鍵匯入 ({scannedReceiptData.items.length} 筆)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 16. ⚠️ 沒有設定 Gemini API Key 時的明確提示視窗 */}
+      {missingApiKeyModalMsg && (
+        <div
+          className="fixed inset-0 z-[240] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setMissingApiKeyModalMsg(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#F5D0A9] space-y-3.5"
+          >
+            <div className="flex items-start justify-between gap-2 border-b border-[#FDEBD0] pb-2.5">
+              <div className="flex items-center gap-2">
+                <span className="w-9 h-9 rounded-2xl bg-[#FFF3E0] text-[#D97706] flex items-center justify-center text-lg shrink-0">
+                  ⚠️
+                </span>
+                <div>
+                  <h3 className="text-base font-extrabold text-[#14241D]">
+                    尚未設定 Gemini API Key
+                  </h3>
+                  <p className="text-[11px] text-[#9A3412] font-bold">
+                    目前無法使用 Gemini AI 進階功能
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMissingApiKeyModalMsg(null)}
+                className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-[#FFF8F1] border border-[#F5D0A9] text-xs font-bold text-[#7C2D12] leading-relaxed">
+              {missingApiKeyModalMsg}
+            </div>
+
+            <div className="p-3 rounded-2xl bg-[#EAF4EF] border border-[#CFE3D8] text-[11px] font-semibold text-[#1A5D42] space-y-1">
+              <div className="font-extrabold">
+                ✅ 離線後備功能狀態：{geminiConfigured ? 'AI 已就緒' : '100% 離線後備運作中'}
+              </div>
+              <p className="text-[#355245] leading-snug">
+                即使未設定 Gemini API Key，本 App 的所有核心功能（手動快速記帳、離線地理時段排程、內建日英手指溝通卡、航班與飯店地址查詢）皆可 100% 正常使用！
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setMissingApiKeyModalMsg(null)}
+              className="w-full py-2.5 rounded-xl bg-[#1A5D42] hover:bg-[#134631] text-white font-extrabold text-sm transition"
+            >
+              我知道了
+            </button>
           </div>
         </div>
       )}

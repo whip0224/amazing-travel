@@ -1,5 +1,5 @@
-import { GoogleGenAI, Type } from '@google/genai';
 import type { SavedDestination } from '../types/tabi';
+import { optimizeItineraryViaServer } from './geminiClient';
 
 export interface TripDayOption {
   index: number;
@@ -36,6 +36,7 @@ export interface AIOptimizationResult {
   reorderedCount: number;
   closedDayAvoidedCount: number;
   usedModel: 'gemini' | 'smart-geo-engine';
+  missingApiKeyNotice?: string;
   suggestionsByDay: Record<number, OptimizedStopSuggestion[]>;
   allSuggestions: OptimizedStopSuggestion[];
 }
@@ -435,7 +436,7 @@ export function runSmartGeoTimeOptimization(
   };
 }
 
-// 結合 Gemini API (若環境有提供 API Key 且連線中) 與本地智慧地理引擎的雙核心優化函式
+// 結合伺服器端 Gemini API (/api/gemini) 與本地智慧地理引擎的雙核心優化函式
 export async function optimizeItineraryWithAI(
   destinations: SavedDestination[],
   tripDays: TripDayOption[],
@@ -444,13 +445,19 @@ export async function optimizeItineraryWithAI(
   // 先執行本地高精度地理與時段演算法作為基準結果 (同時確保毫秒級保底與離線可用)
   const baseResult = runSmartGeoTimeOptimization(destinations, tripDays, mode);
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || !navigator.onLine || destinations.length === 0) {
+  if (destinations.length === 0) {
     return baseResult;
   }
 
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return {
+      ...baseResult,
+      missingApiKeyNotice:
+        '目前處於離線狀態，無法呼叫 Gemini AI 模型；已自動切換為「內建離線地理時段引擎」為您完成排程後備。',
+    };
+  }
+
   try {
-    const ai = new GoogleGenAI({ apiKey });
     const placesPayload = destinations.map((d) => ({
       id: d.id,
       name: d.customName || d.name,
@@ -468,54 +475,18 @@ export async function optimizeItineraryWithAI(
       zhDisp: d.zhDisp,
     }));
 
-    const prompt = `你是一位專業的日本與亞洲旅遊動線規劃師。請分析以下「目的地清單」與「可用旅行日期」，為使用者規劃最順路（減少折返交通）、避開店家公休日、且符合景點性質（上午神社寺院、中午市場/正餐美食、下午甜點散策、傍晚夜景老街）的最佳訪問順序與建議時間段。
-模式：${
-      mode === 'fill_and_reorder'
-        ? '保留已指定日期的景點在原日期，並為未排程景點分配最佳日期與時間，同時優化每日訪問順序與時間段'
-        : '全行程重新最佳化分配至各天'
-    }。
-請確保每個輸入的景點 id 都有被安排，且同一天的時間段不重疊（格式 HH:MM，24小時制）。
+    const res = await optimizeItineraryViaServer(placesPayload, daysPayload, mode);
 
-可用日期：${JSON.stringify(daysPayload)}
-目的地清單：${JSON.stringify(placesPayload)}`;
+    if (!res.ok || !res.data) {
+      return {
+        ...baseResult,
+        missingApiKeyNotice:
+          res.errorMessage ||
+          '尚未偵測到有效的 Gemini API Key，無法使用 Gemini AI 模型；目前已自動使用「內建離線地理時段引擎」作為後備排程。',
+      };
+    }
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            summaryPoints: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            estimatedSavedMinutes: { type: Type.INTEGER },
-            stops: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  destId: { type: Type.STRING },
-                  dayIndex: { type: Type.INTEGER },
-                  start: { type: Type.STRING },
-                  end: { type: Type.STRING },
-                  transport: { type: Type.STRING },
-                  cost: { type: Type.STRING },
-                  reason: { type: Type.STRING },
-                },
-                required: ['destId', 'dayIndex', 'start', 'end', 'transport', 'cost', 'reason'],
-              },
-            },
-          },
-          required: ['summaryPoints', 'estimatedSavedMinutes', 'stops'],
-        },
-      },
-    });
-
-    if (!response.text) return baseResult;
-    const parsed = JSON.parse(response.text);
+    const parsed = res.data;
     if (!Array.isArray(parsed.stops) || parsed.stops.length === 0) {
       return baseResult;
     }
@@ -526,7 +497,7 @@ export async function optimizeItineraryWithAI(
     });
     const allSuggestions: OptimizedStopSuggestion[] = [];
 
-    parsed.stops.forEach((s: any) => {
+    parsed.stops.forEach((s) => {
       const dest = destinations.find((d) => d.id === s.destId);
       if (!dest) return;
       const safeDayIdx = Math.min(tripDays.length - 1, Math.max(0, Number(s.dayIndex) || 0));
@@ -546,7 +517,7 @@ export async function optimizeItineraryWithAI(
         durationLabel: `${hours} hours`,
         transport: s.transport || '地鐵',
         cost: String(s.cost || '1500').replace(/[^0-9]/g, '') || '1500',
-        reason: s.reason || '✨ AI 順路動線與最佳時段推薦',
+        reason: s.reason || '✨ Gemini AI 順路動線與最佳時段推薦',
         wasPreviouslyUnscheduled: !dest.scheduled,
       };
       suggestionsByDay[safeDayIdx].push(itemSuggestion);
@@ -566,12 +537,17 @@ export async function optimizeItineraryWithAI(
         Array.isArray(parsed.summaryPoints) && parsed.summaryPoints.length > 0
           ? parsed.summaryPoints
           : baseResult.summaryPoints,
-      estimatedSavedMinutes: Number(parsed.estimatedSavedMinutes) || baseResult.estimatedSavedMinutes,
+      estimatedSavedMinutes:
+        Number(parsed.estimatedSavedMinutes) || baseResult.estimatedSavedMinutes,
       usedModel: 'gemini',
       suggestionsByDay,
       allSuggestions,
     };
   } catch {
-    return baseResult;
+    return {
+      ...baseResult,
+      missingApiKeyNotice:
+        '無法連線至 Gemini AI 服務，已自動切換為「內建離線地理時段引擎」完成排程後備。',
+    };
   }
 }

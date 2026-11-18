@@ -14,8 +14,9 @@
     overscroll-behavior-y: none;
   }
 
-  /* Fix iOS Safari <input type="date"> intrinsic width overflow */
-  input[type='date'] {
+  /* Fix iOS Safari <input type="date"> and <input type="time"> intrinsic width overflow */
+  input[type='date'],
+  input[type='time'] {
     -webkit-appearance: none;
     appearance: none;
     min-width: 0;

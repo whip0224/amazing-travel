@@ -7,9 +7,15 @@ import {
   Building2,
   Check,
   Sparkles,
+  Loader2,
 } from 'lucide-react';
 import { AIRPORTS_BY_COUNTRY, type AirportItem } from '../airports.js';
 import type { FlightLeg } from '../types/tabi';
+import {
+  lookupFlightByNumber,
+  calculateFlightDuration,
+  formatFlightDateLabel,
+} from '../utils/flightLookup';
 
 export interface AirportTargetSlot {
   leg: 'outbound' | 'inbound';
@@ -21,6 +27,8 @@ interface AirportSearchModalProps {
   initialSlot: AirportTargetSlot;
   outbound: FlightLeg;
   inbound: FlightLeg;
+  startDate?: string;
+  endDate?: string;
   airlineLabel: string;
   onSelectAirport: (
     leg: 'outbound' | 'inbound',
@@ -44,6 +52,8 @@ export const AirportSearchModal: React.FC<AirportSearchModalProps> = ({
   initialSlot,
   outbound,
   inbound,
+  startDate,
+  endDate,
   airlineLabel,
   onSelectAirport,
   onUpdateFlightMeta,
@@ -54,11 +64,19 @@ export const AirportSearchModal: React.FC<AirportSearchModalProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [countryFilter, setCountryFilter] = useState<string>('ALL');
   const [customTerminalMap, setCustomTerminalMap] = useState<Record<string, string>>({});
+  const [isLookingUpFlight, setIsLookingUpFlight] = useState(false);
+  const [lookupFeedback, setLookupFeedback] = useState<string | null>(null);
+  const [pairedReturnOffer, setPairedReturnOffer] = useState<{
+    flightNo: string;
+    updates: Partial<FlightLeg>;
+  } | null>(null);
 
   // Sync activeSlot when modal reopens with a specific slot
   React.useEffect(() => {
     if (open) {
       setActiveSlot(initialSlot);
+      setLookupFeedback(null);
+      setPairedReturnOffer(null);
     }
   }, [open, initialSlot]);
 
@@ -394,54 +412,189 @@ export const AirportSearchModal: React.FC<AirportSearchModalProps> = ({
           )}
         </div>
 
-        {/* 底部當前航段時間與航班號微調列 */}
-        <div className="p-4 bg-white border-t border-[#DCEAE2] space-y-2.5">
-          <div className="flex items-center justify-between text-xs font-extrabold text-[#1A5D42]">
-            <span className="flex items-center gap-1">
-              <Sparkles className="w-3.5 h-3.5" />
-              {activeSlot.leg === 'outbound' ? '去程 (Outbound)' : '回程 (Return)'} 時間與航班號設定
+        {/* 底部當前航段時間與航班號微調列 (分離航班編號與起降時間，避免手機輸入框重疊，並支援航班號自動帶入) */}
+        <div className="p-4 bg-white border-t border-[#DCEAE2] space-y-2.5 overflow-hidden">
+          <div className="flex items-center justify-between gap-2 text-xs font-extrabold text-[#1A5D42]">
+            <span className="flex items-center gap-1 min-w-0 truncate">
+              <Sparkles className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">
+                {activeSlot.leg === 'outbound' ? '去程 (Outbound)' : '回程 (Return)'} 時間與航班號設定
+              </span>
             </span>
             <input
               type="text"
               value={airlineLabel}
               onChange={(e) => onUpdateAirlineLabel(e.target.value)}
               placeholder="航空公司 (如 ANA · Economy)"
-              className="px-2.5 py-1 rounded-lg bg-[#F4FAF6] border border-[#DCEAE2] text-[11px] font-bold text-right w-40"
+              className="px-2.5 py-1 rounded-lg bg-[#F4FAF6] border border-[#DCEAE2] text-[11px] font-bold text-right w-36 sm:w-44 shrink-0"
             />
           </div>
 
-          <div className="grid grid-cols-3 gap-2">
-            <div>
-              <label className="text-[10.5px] font-bold text-[#5A7066]">起飛時間</label>
-              <input
-                type="time"
-                value={currentLegObj.departTime}
-                onChange={(e) =>
-                  onUpdateFlightMeta(activeSlot.leg, { departTime: e.target.value })
-                }
-                className="w-full px-2.5 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold mt-0.5"
-              />
+          {/* 第一排：航班編號 + 智慧查詢自動填寫按鈕 */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10.5px] font-bold text-[#5A7066]">
+                航班編號（輸入後點「自動帶入」可自動填寫起降機場、時間與日期）
+              </label>
             </div>
-            <div>
-              <label className="text-[10.5px] font-bold text-[#5A7066]">抵達時間</label>
-              <input
-                type="time"
-                value={currentLegObj.arriveTime}
-                onChange={(e) =>
-                  onUpdateFlightMeta(activeSlot.leg, { arriveTime: e.target.value })
-                }
-                className="w-full px-2.5 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold mt-0.5"
-              />
-            </div>
-            <div>
-              <label className="text-[10.5px] font-bold text-[#5A7066]">航班編號</label>
+            <div className="flex items-center gap-2">
               <input
                 type="text"
                 value={currentLegObj.flightNo}
-                onChange={(e) =>
-                  onUpdateFlightMeta(activeSlot.leg, { flightNo: e.target.value })
-                }
-                className="w-full px-2.5 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold mt-0.5"
+                onChange={(e) => {
+                  onUpdateFlightMeta(activeSlot.leg, { flightNo: e.target.value });
+                  setLookupFeedback(null);
+                }}
+                onKeyDown={async (e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    setIsLookingUpFlight(true);
+                    setPairedReturnOffer(null);
+                    try {
+                      const res = await lookupFlightByNumber(
+                        currentLegObj.flightNo,
+                        activeSlot.leg,
+                        currentLegObj,
+                        startDate,
+                        endDate
+                      );
+                      onUpdateFlightMeta(activeSlot.leg, res.updates);
+                      if (res.airlineLabel) {
+                        onUpdateAirlineLabel(res.airlineLabel);
+                      }
+                      setLookupFeedback(res.message);
+                      if (res.pairedReturnFlightNo && res.pairedReturnUpdates) {
+                        setPairedReturnOffer({
+                          flightNo: res.pairedReturnFlightNo,
+                          updates: res.pairedReturnUpdates,
+                        });
+                      }
+                    } finally {
+                      setIsLookingUpFlight(false);
+                    }
+                  }
+                }}
+                placeholder="例如：CX506、UO686、HX618、NH991、BR198..."
+                className="flex-1 min-w-0 px-3 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-extrabold text-[#14241D]"
+              />
+              <button
+                type="button"
+                disabled={isLookingUpFlight}
+                onClick={async () => {
+                  setIsLookingUpFlight(true);
+                  setPairedReturnOffer(null);
+                  try {
+                    const res = await lookupFlightByNumber(
+                      currentLegObj.flightNo,
+                      activeSlot.leg,
+                      currentLegObj,
+                      startDate,
+                      endDate
+                    );
+                    onUpdateFlightMeta(activeSlot.leg, res.updates);
+                    if (res.airlineLabel) {
+                      onUpdateAirlineLabel(res.airlineLabel);
+                    }
+                    setLookupFeedback(res.message);
+                    if (res.pairedReturnFlightNo && res.pairedReturnUpdates) {
+                      setPairedReturnOffer({
+                        flightNo: res.pairedReturnFlightNo,
+                        updates: res.pairedReturnUpdates,
+                      });
+                    }
+                  } finally {
+                    setIsLookingUpFlight(false);
+                  }
+                }}
+                className="px-3 py-1.5 rounded-xl bg-[#E3F2EA] hover:bg-[#CFE8DB] text-[#165C3E] text-xs font-extrabold flex items-center gap-1.5 shrink-0 transition disabled:opacity-50"
+              >
+                {isLookingUpFlight ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <span>🔍</span>
+                )}
+                <span>{isLookingUpFlight ? '查詢中...' : '自動帶入'}</span>
+              </button>
+            </div>
+
+            {lookupFeedback && (
+              <div className="mt-1.5 px-2.5 py-1.5 rounded-xl bg-[#EAF4EF] border border-[#CFE3D8] text-[11px] font-bold text-[#1A5D42] flex items-center justify-between gap-2 flex-wrap">
+                <span>{lookupFeedback}</span>
+                {pairedReturnOffer && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onUpdateFlightMeta('inbound', pairedReturnOffer.updates);
+                      setLookupFeedback(
+                        `✅ 已同步帶入回程航班 ${pairedReturnOffer.flightNo} 與回程日期！`
+                      );
+                      setPairedReturnOffer(null);
+                    }}
+                    className="px-2 py-0.5 rounded-lg bg-[#1A5D42] text-white text-[10.5px] font-extrabold hover:bg-[#134631] transition shrink-0"
+                  >
+                    ✨ 同步帶入回程 ({pairedReturnOffer.flightNo})
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* 第二排：起飛時間 & 抵達時間 (雙欄獨立滿版，徹底解決手機重疊問題，並自動計算航程時間) */}
+          <div className="grid grid-cols-2 gap-2.5">
+            <div className="min-w-0">
+              <label className="text-[10.5px] font-bold text-[#5A7066] block mb-0.5">
+                起飛時間 ({currentLegObj.departCode})
+              </label>
+              <input
+                type="time"
+                value={currentLegObj.departTime}
+                onChange={(e) => {
+                  const nextDepart = e.target.value;
+                  const nextDuration = calculateFlightDuration(
+                    nextDepart,
+                    currentLegObj.arriveTime,
+                    currentLegObj.departCode,
+                    currentLegObj.arriveCode
+                  );
+                  const dateLabel = formatFlightDateLabel(
+                    activeSlot.leg === 'outbound' ? startDate : endDate,
+                    activeSlot.leg
+                  );
+                  onUpdateFlightMeta(activeSlot.leg, {
+                    departTime: nextDepart,
+                    duration: nextDuration,
+                    ...(dateLabel ? { dateLabel } : {}),
+                  });
+                }}
+                className="w-full max-w-full min-w-0 block px-2.5 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold"
+              />
+            </div>
+            <div className="min-w-0">
+              <label className="text-[10.5px] font-bold text-[#5A7066] block mb-0.5">
+                抵達時間 ({currentLegObj.arriveCode})
+              </label>
+              <input
+                type="time"
+                value={currentLegObj.arriveTime}
+                onChange={(e) => {
+                  const nextArrive = e.target.value;
+                  const nextDuration = calculateFlightDuration(
+                    currentLegObj.departTime,
+                    nextArrive,
+                    currentLegObj.departCode,
+                    currentLegObj.arriveCode
+                  );
+                  const dateLabel = formatFlightDateLabel(
+                    activeSlot.leg === 'outbound' ? startDate : endDate,
+                    activeSlot.leg
+                  );
+                  onUpdateFlightMeta(activeSlot.leg, {
+                    arriveTime: nextArrive,
+                    duration: nextDuration,
+                    ...(dateLabel ? { dateLabel } : {}),
+                  });
+                }}
+                className="w-full max-w-full min-w-0 block px-2.5 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold"
               />
             </div>
           </div>
