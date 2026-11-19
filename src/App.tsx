@@ -6730,17 +6730,21 @@ export default function App() {
             <div className="flex items-start justify-between gap-2 border-b border-[#FDEBD0] pb-2.5">
               <div className="flex items-center gap-2">
                 <span className="w-9 h-9 rounded-2xl bg-[#FFF3E0] text-[#D97706] flex items-center justify-center text-lg shrink-0">
-                  {geminiConfigured ? '🤖' : '🔑'}
+                  {missingApiKeyModalMsg.startsWith('✅') ? '🤖' : geminiConfigured ? '⚠️' : '🔑'}
                 </span>
                 <div>
                   <h3 className="text-base font-extrabold text-[#14241D]">
-                    {geminiConfigured
+                    {missingApiKeyModalMsg.startsWith('✅')
                       ? 'Gemini AI 已連線就緒'
+                      : geminiConfigured
+                      ? 'Gemini AI 連線或金鑰異常'
                       : 'Gemini API Key 設定位置說明'}
                   </h3>
                   <p className="text-[11px] text-[#9A3412] font-bold">
-                    {geminiConfigured
+                    {missingApiKeyModalMsg.startsWith('✅')
                       ? '伺服器端已設定 GEMINI_API_KEY'
+                      : geminiConfigured
+                      ? '已偵測到環境變數，但 Google 端回傳錯誤'
                       : '為防金鑰外洩，API Key 設於伺服器環境變數'}
                   </p>
                 </div>
