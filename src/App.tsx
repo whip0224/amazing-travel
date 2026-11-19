@@ -69,7 +69,11 @@ import { usePWAInstall } from './hooks/usePWAInstall';
 import { IntegrationGuideModal } from './components/IntegrationGuideModal';
 import { AirportSearchModal, type AirportTargetSlot } from './components/AirportSearchModal';
 import { formatFlightDateLabel } from './utils/flightLookup';
-import { findDestinationPhoto } from './utils/photoFinder';
+import {
+  findDestinationPhoto,
+  findHotelPhoto,
+  isInvalidCachedHotelPhoto,
+} from './utils/photoFinder';
 import {
   optimizeItineraryWithAI,
   type AIOptimizationResult,
@@ -498,8 +502,9 @@ export default function App() {
   const [hotelCandidates, setHotelCandidates] = useState<HotelCandidate[]>([]);
   const [isSearchingHotelAddress, setIsSearchingHotelAddress] = useState(false);
 
-  // 🖼️ 編輯旅程目的地後自動找尋 Hero 主視覺圖片狀態
+  // 🖼️ 編輯旅程目的地後自動找尋 Hero 主視覺圖片狀態 & 飯店智能換圖狀態
   const [isSearchingHeroPhoto, setIsSearchingHeroPhoto] = useState(false);
+  const [isSearchingStayPhoto, setIsSearchingStayPhoto] = useState(false);
 
   const togglePrepItem = (id: string) => {
     setCheckedPrepIds((prev) => {
@@ -516,6 +521,7 @@ export default function App() {
   // StPageFlip 3D 書本翻頁 Ref 與手勢開關 Ref
   const bookContainerRef = useRef<HTMLDivElement | null>(null);
   const pageFlipRef = useRef<PageFlip | null>(null);
+  const customFlipTargetRef = useRef<number | null>(null);
   const enableSwipeFlipRef = useRef<boolean>(state.enableSwipeFlip);
   const swipeEdgeOnlyRef = useRef<boolean>(state.swipeEdgeOnly !== false);
 
@@ -757,28 +763,31 @@ export default function App() {
     }
   };
 
-  // --- 初始化 StPageFlip 3D 書本翻頁引擎 + 防誤觸與邊緣觸發控制 ---
+  // --- 初始化 StPageFlip 3D 書本翻頁引擎 + 雙向 (左至右 & 右至左) 3D 翻頁修正與防誤觸控制 ---
   useEffect(() => {
     const container = bookContainerRef.current;
     if (!container) return;
 
-    const EDGE_TRIGGER_WIDTH_PX = 24;
+    const EDGE_TRIGGER_WIDTH_PX = 36;
     const canStartFlipGesture = (clientX: number, target: EventTarget | null, rectEl: HTMLElement): boolean => {
       if (!enableSwipeFlipRef.current) return false;
+      const rect = rectEl.getBoundingClientRect();
+      const relX = clientX - rect.left;
+      const isLeftEdge = relX >= 0 && relX <= EDGE_TRIGGER_WIDTH_PX;
+      const isRightEdge = relX >= rect.width - EDGE_TRIGGER_WIDTH_PX && relX <= rect.width;
+
       if (target instanceof HTMLElement) {
-        const isInteractiveControl = target.closest(
-          'input, textarea, select, button, a, label, [data-no-flip="true"]'
+        const isDirectControl = target.closest(
+          'input, textarea, select, button, a, label, .day-strip-scroll'
         );
-        if (isInteractiveControl) return false;
-      }
-      if (swipeEdgeOnlyRef.current) {
-        const rect = rectEl.getBoundingClientRect();
-        const relX = clientX - rect.left;
-        const isLeftEdge = relX >= 0 && relX <= EDGE_TRIGGER_WIDTH_PX;
-        const isRightEdge = relX >= rect.width - EDGE_TRIGGER_WIDTH_PX && relX <= rect.width;
-        if (!isLeftEdge && !isRightEdge) {
+        if (isDirectControl) return false;
+
+        if (!isLeftEdge && !isRightEdge && target.closest('[data-no-flip="true"]')) {
           return false;
         }
+      }
+      if (swipeEdgeOnlyRef.current && !isLeftEdge && !isRightEdge) {
+        return false;
       }
       return true;
     };
@@ -797,7 +806,7 @@ export default function App() {
           maxShadowOpacity: 0.35,
           showCover: false,
           mobileScrollSupport: true,
-          swipeDistance: 45,
+          swipeDistance: 35,
           clickEventForward: true,
           useMouseEvents: true,
           showPageCorners: false,
@@ -811,6 +820,132 @@ export default function App() {
         const pages = bookContainerRef.current.querySelectorAll('.tabi-book-page');
         if (pages.length > 0) {
           pf.loadFromHTML(pages as unknown as HTMLElement[]);
+
+          // 1. 修正 StPageFlip 在 Portrait 單頁模式下 direction === 1 (左至右翻頁) 的座標偏移與底頁繪製問題，
+          //    並支援任意跨頁切換時直接對目標頁做雙向 3D 翻頁動畫（不閃過中間頁）
+          const render = (pf as any).getRender?.();
+          const pageCol = (pf as any).getPageCollection?.();
+          const flipCtrl = (pf as any).getFlipController?.();
+
+          if (render) {
+            render.convertToGlobal = function (pos: any, dir?: number) {
+              const d = dir !== undefined ? dir : this.direction;
+              if (pos == null) return null;
+              const rect = this.getRect();
+              if (this.getOrientation() === 'portrait') {
+                return {
+                  x: d === 0 ? pos.x : rect.pageWidth - pos.x,
+                  y: pos.y + rect.top,
+                };
+              }
+              return {
+                x: d === 0 ? pos.x + rect.left + rect.width / 2 : rect.width / 2 - pos.x + rect.left,
+                y: pos.y + rect.top,
+              };
+            };
+
+            render.convertToPage = function (pos: any, dir?: number) {
+              const d = dir !== undefined ? dir : this.direction;
+              const rect = this.getRect();
+              if (this.getOrientation() === 'portrait') {
+                return {
+                  x: d === 0 ? pos.x : rect.pageWidth - pos.x,
+                  y: pos.y - rect.top,
+                };
+              }
+              return {
+                x: d === 0 ? pos.x - rect.left - rect.width / 2 : rect.width / 2 - pos.x + rect.left,
+                y: pos.y - rect.top,
+              };
+            };
+
+            render.drawBottomPage = function () {
+              if (this.bottomPage === null) return;
+              const density = this.flippingPage != null ? this.flippingPage.getDrawingDensity() : null;
+              this.bottomPage.getElement().style.zIndex = (
+                this.getSettings().startZIndex + 3
+              ).toString(10);
+              this.bottomPage.draw(density);
+            };
+          }
+
+          if (pageCol) {
+            pageCol.getFlippingPage = function (dir: number) {
+              const curr = this.currentSpreadIndex;
+              const customTarget = customFlipTargetRef.current;
+              if (this.render.getOrientation() === 'portrait') {
+                if (dir === 0) {
+                  return this.pages[curr].newTemporaryCopy();
+                }
+                const targetIdx =
+                  customTarget !== null && customTarget < curr ? customTarget : Math.max(0, curr - 1);
+                return this.pages[targetIdx].newTemporaryCopy();
+              }
+              const spread = dir === 0 ? this.getSpread()[curr + 1] : this.getSpread()[curr - 1];
+              return spread.length === 1 || dir === 0
+                ? this.pages[spread[0]]
+                : this.pages[spread[1]];
+            };
+
+            pageCol.getBottomPage = function (dir: number) {
+              const curr = this.currentSpreadIndex;
+              const customTarget = customFlipTargetRef.current;
+              if (this.render.getOrientation() === 'portrait') {
+                if (dir === 0) {
+                  const targetIdx =
+                    customTarget !== null && customTarget > curr
+                      ? customTarget
+                      : Math.min(this.pages.length - 1, curr + 1);
+                  return this.pages[targetIdx];
+                }
+                const targetIdx =
+                  customTarget !== null && customTarget < curr ? customTarget : Math.max(0, curr - 1);
+                return this.pages[targetIdx];
+              }
+              const spread = dir === 0 ? this.getSpread()[curr + 1] : this.getSpread()[curr - 1];
+              return spread.length === 1
+                ? this.pages[spread[0]]
+                : dir === 0
+                ? this.pages[spread[1]]
+                : this.pages[spread[0]];
+            };
+          }
+
+          (pf as any).turnToNextPage = function () {
+            const customTarget = customFlipTargetRef.current;
+            customFlipTargetRef.current = null;
+            if (customTarget !== null && customTarget >= 0 && customTarget < this.pages.getPageCount()) {
+              this.pages.show(customTarget);
+            } else {
+              this.pages.showNext();
+            }
+          };
+
+          (pf as any).turnToPrevPage = function () {
+            const customTarget = customFlipTargetRef.current;
+            customFlipTargetRef.current = null;
+            if (customTarget !== null && customTarget >= 0 && customTarget < this.pages.getPageCount()) {
+              this.pages.show(customTarget);
+            } else {
+              this.pages.showPrev();
+            }
+          };
+
+          if (flipCtrl) {
+            // 修正右至左 (direction === 0) 與左至右 (direction === 1) 手勢拖曳放開時的完成門檻
+            flipCtrl.stopMove = function () {
+              if (this.calc === null) return;
+              const pos = this.calc.getPosition();
+              const rect = this.getBoundsRect();
+              const cornerY = this.calc.getCorner() === 'bottom' ? rect.height : 0;
+              // 只要拖曳超過頁面寬度 22% (pos.x <= rect.pageWidth * 0.78)，放手即完成翻頁
+              if (pos.x <= rect.pageWidth * 0.78) {
+                this.animateFlippingTo(pos, { x: -rect.pageWidth, y: cornerY }, true);
+              } else {
+                this.animateFlippingTo(pos, { x: rect.pageWidth, y: cornerY }, false);
+              }
+            };
+          }
 
           // 攔截 userStop：當使用者只是單純點擊畫面而沒有拖曳 (isUserMove === false) 時，絕不觸發點擊翻頁
           (pf as any).userStop = function (_pos: any, isSwipe = false) {
@@ -828,6 +963,7 @@ export default function App() {
 
           const ui = (pf as any).ui;
           if (ui && typeof ui.removeHandlers === 'function' && typeof ui.setHandlers === 'function') {
+            ui.swipeTimeout = 650;
             ui.removeHandlers();
             const origMouseDown = ui.onMouseDown;
             const origTouchStart = ui.onTouchStart;
@@ -839,6 +975,7 @@ export default function App() {
                 (pf as any).isUserTouch = false;
                 return;
               }
+              customFlipTargetRef.current = null;
               origMouseDown(e);
             };
 
@@ -850,6 +987,7 @@ export default function App() {
                 (pf as any).isUserTouch = false;
                 return;
               }
+              customFlipTargetRef.current = null;
               origTouchStart(e);
             };
 
@@ -883,7 +1021,7 @@ export default function App() {
 
   // 切換書頁輔助函式：
   // PAGE_ORDER = ['discover', 'trips', 'plan', 'tools'] 與底部導覽列完全一致！
-  // 相鄰頁面 (例如 Discover <-> Trips) 直接 3D 翻頁；跨多頁切換時直接 turnToPage(targetIdx)，絕不閃過中間頁 (如 Plan)
+  // 不論是左至右 (targetIdx < currentIdx) 或右至左 (targetIdx > currentIdx)、相鄰或跨頁，皆播放對應方向的 3D 翻頁效果且不閃過中間頁
   const navigateToTab = (tab: TabKey) => {
     setActiveTab(tab);
     const targetIdx = PAGE_ORDER.indexOf(tab);
@@ -901,22 +1039,20 @@ export default function App() {
 
         const currentIdx = pf.getCurrentPageIndex();
         if (currentIdx !== targetIdx) {
-          if (Math.abs(targetIdx - currentIdx) === 1) {
-            if (targetIdx > currentIdx) {
-              pf.flipNext();
-            } else {
-              pf.flipPrev();
-            }
-            const stateAfter = flipCtrl?.getState?.();
-            if (stateAfter !== 'flipping') {
-              pf.turnToPage(targetIdx);
-            }
+          customFlipTargetRef.current = targetIdx;
+          if (targetIdx > currentIdx) {
+            pf.flipNext();
           } else {
-            // 跨頁切換直接定位至目標頁，避免先閃過中間頁面
+            pf.flipPrev();
+          }
+          const stateAfter = flipCtrl?.getState?.();
+          if (stateAfter !== 'flipping') {
+            customFlipTargetRef.current = null;
             pf.turnToPage(targetIdx);
           }
         }
       } catch {
+        customFlipTargetRef.current = null;
         try {
           pf.turnToPage(targetIdx);
         } catch {
@@ -1208,7 +1344,57 @@ export default function App() {
     }
   };
 
-  // --- 🏨 輸入飯店名稱後自動查詢地址（單一結果直接填入，多個分館跳出選擇卡片） ---
+  // --- 🏨 飯店／住宿智能換圖功能（根據飯店名稱、地址與目的地自動尋找匹配的飯店外觀或客房圖片） ---
+  const handleAutoFindStayPhoto = async (
+    hotelNameOverride?: string,
+    addressOverride?: string
+  ) => {
+    const queryName = (hotelNameOverride ?? state.stay.hotelName).trim();
+    const queryAddr = (addressOverride ?? state.stay.address).trim();
+    if (!queryName || isSearchingStayPhoto) return;
+    setIsSearchingStayPhoto(true);
+    try {
+      const nextPhotoUrl = await findHotelPhoto(
+        queryName,
+        queryAddr,
+        state.trip.destinationTitle,
+        state.stay.photoUrl
+      );
+      setState((prev) => ({
+        ...prev,
+        stay: {
+          ...prev.stay,
+          photoUrl: nextPhotoUrl,
+        },
+      }));
+      showToast(`🖼️ 已為「${queryName}」智能換上合適飯店圖片！`);
+    } catch {
+      showToast('⚠️ 暫時無法取得線上飯店圖片，已保留目前照片');
+    } finally {
+      setIsSearchingStayPhoto(false);
+    }
+  };
+
+  // 若 LocalStorage 舊快取中存到了先前維基百科全文搜尋誤抓的韓團/無關照片，載入時自動替換為正確飯店實景圖
+  useEffect(() => {
+    if (isInvalidCachedHotelPhoto(state.stay.photoUrl)) {
+      findHotelPhoto(
+        state.stay.hotelName,
+        state.stay.address,
+        state.trip.destinationTitle
+      ).then((fixedUrl) => {
+        setState((prev) => ({
+          ...prev,
+          stay: {
+            ...prev.stay,
+            photoUrl: fixedUrl,
+          },
+        }));
+      });
+    }
+  }, [state.stay.photoUrl, state.stay.hotelName, state.stay.address, state.trip.destinationTitle]);
+
+  // --- 🏨 輸入飯店名稱後自動查詢地址（單一結果直接填入並智能配圖，多個分館跳出選擇卡片） ---
   const handleSearchHotelAddress = async (hotelQueryOverride?: string) => {
     const query = (hotelQueryOverride ?? state.stay.hotelName).trim();
     if (!query || query.length < 2) {
@@ -1220,17 +1406,19 @@ export default function App() {
       const results = await searchHotelCandidates(query, state.trip.destinationTitle);
       if (results.length === 1) {
         const matched = results[0];
+        const finalHotelName = matched.name || state.stay.hotelName;
         setState((prev) => ({
           ...prev,
           stay: {
             ...prev.stay,
-            hotelName: matched.name || prev.stay.hotelName,
+            hotelName: finalHotelName,
             address: matched.address,
             subTitle: matched.branchNote || prev.stay.subTitle,
           },
         }));
         setHotelCandidates([]);
-        showToast(`✅ 已自動填寫「${matched.name}」的地址！`);
+        showToast(`✅ 已自動填寫「${finalHotelName}」的地址並配對飯店圖片！`);
+        handleAutoFindStayPhoto(finalHotelName, matched.address);
       } else if (results.length > 1) {
         setHotelCandidates(results);
         showToast(`🏨 發現 ${results.length} 個相關分館/地址，請點選下方卡片套用！`);
@@ -2330,7 +2518,7 @@ export default function App() {
         </span>
       </div>
 
-      <div className="flex items-center gap-2" data-no-flip="true">
+      <div className="flex items-center gap-1.5" data-no-flip="true">
         {!isOnline && (
           <span
             title="離線模式：使用 LocalStorage 快取"
@@ -2339,6 +2527,25 @@ export default function App() {
             <WifiOff className="w-3 h-3" /> 離線
           </span>
         )}
+        <button
+          type="button"
+          onClick={() =>
+            setMissingApiKeyModalMsg(
+              geminiConfigured
+                ? '✅ 目前伺服器已成功載入 GEMINI_API_KEY！所有 Gemini AI 功能（拍收據自動記帳、AI 智慧行程優化、AI 即時生成溝通字卡）皆已啟用。'
+                : '尚未偵測到伺服器的 GEMINI_API_KEY 環境變數。為保護您的金鑰不被前端網頁外洩，API Key 不會在手機畫面上直接輸入，而是設定於後端環境變數中（請見下方設定步驟）。'
+            )
+          }
+          title="查看 Gemini API Key 設定位置與 AI 狀態"
+          className={`px-2.5 py-1 rounded-full text-[10.5px] font-extrabold flex items-center gap-1 shadow-2xs transition ${
+            geminiConfigured
+              ? 'bg-[#D8F3E5] text-[#15563B] hover:bg-[#c5ebd8]'
+              : 'bg-[#FFF3E0] text-[#B45309] border border-[#F5D0A9] hover:bg-[#fde8c8]'
+          }`}
+        >
+          <Sparkles className="w-3 h-3" />
+          <span>{geminiConfigured ? 'AI 已就緒' : 'API Key 位置'}</span>
+        </button>
         {isInstallable && (
           <button
             type="button"
@@ -3309,12 +3516,28 @@ export default function App() {
 
                   <div className="bg-white rounded-[28px] p-4 shadow-sm border border-[#E2EFE8] space-y-3.5">
                     <div className="flex items-start gap-3.5">
-                      <img
-                        src={state.stay.photoUrl}
-                        alt={state.stay.hotelName}
-                        className="w-[88px] h-[88px] rounded-2xl object-cover shrink-0 shadow-xs"
-                        referrerPolicy="no-referrer"
-                      />
+                      <div className="relative w-[88px] h-[88px] shrink-0 group" data-no-flip="true">
+                        <img
+                          src={state.stay.photoUrl}
+                          alt={state.stay.hotelName}
+                          className="w-[88px] h-[88px] rounded-2xl object-cover shadow-xs"
+                          referrerPolicy="no-referrer"
+                        />
+                        <button
+                          type="button"
+                          disabled={isSearchingStayPhoto}
+                          onClick={() => handleAutoFindStayPhoto()}
+                          title="根據飯店名稱智能換圖"
+                          className="absolute bottom-1 right-1 left-1 py-0.5 px-1.5 rounded-lg bg-black/65 hover:bg-black/80 text-white text-[10px] font-extrabold flex items-center justify-center gap-1 backdrop-blur-2xs transition disabled:opacity-60"
+                        >
+                          {isSearchingStayPhoto ? (
+                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                          ) : (
+                            <ImageIcon className="w-2.5 h-2.5" />
+                          )}
+                          <span>{isSearchingStayPhoto ? '搜尋中' : '智能換圖'}</span>
+                        </button>
+                      </div>
                       <div className="min-w-0 flex-1">
                         <div className="text-[12px] text-[#7D6B63] font-semibold flex items-center gap-1">
                           <span className="text-[#C85228] tracking-widest">☆☆☆☆</span>
@@ -5555,21 +5778,36 @@ export default function App() {
             </div>
 
             <div>
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center justify-between mb-1 gap-1.5 flex-wrap">
                 <label className="text-xs font-bold text-[#4A6357]">飯店名稱</label>
-                <button
-                  type="button"
-                  disabled={isSearchingHotelAddress}
-                  onClick={() => handleSearchHotelAddress()}
-                  className="px-2.5 py-1 rounded-lg bg-[#E3F2EA] hover:bg-[#CFE8DB] text-[#165C3E] text-[11px] font-extrabold flex items-center gap-1 transition disabled:opacity-50"
-                >
-                  {isSearchingHotelAddress ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <Search className="w-3 h-3" />
-                  )}
-                  <span>{isSearchingHotelAddress ? '搜尋地址中...' : '自動搜尋地址'}</span>
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={isSearchingStayPhoto}
+                    onClick={() => handleAutoFindStayPhoto()}
+                    className="px-2.5 py-1 rounded-lg bg-[#FCE3DA] hover:bg-[#f7d0c1] text-[#B83E1B] text-[11px] font-extrabold flex items-center gap-1 transition disabled:opacity-50"
+                  >
+                    {isSearchingStayPhoto ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <ImageIcon className="w-3 h-3" />
+                    )}
+                    <span>{isSearchingStayPhoto ? '換圖中...' : '智能換圖'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSearchingHotelAddress}
+                    onClick={() => handleSearchHotelAddress()}
+                    className="px-2.5 py-1 rounded-lg bg-[#E3F2EA] hover:bg-[#CFE8DB] text-[#165C3E] text-[11px] font-extrabold flex items-center gap-1 transition disabled:opacity-50"
+                  >
+                    {isSearchingHotelAddress ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Search className="w-3 h-3" />
+                    )}
+                    <span>{isSearchingHotelAddress ? '搜尋地址中...' : '自動搜尋地址'}</span>
+                  </button>
+                </div>
               </div>
               <input
                 type="text"
@@ -5589,6 +5827,39 @@ export default function App() {
                 placeholder="例如：APA Hotel 京都、東橫INN、The Gate Hotel..."
                 className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
               />
+            </div>
+
+            {/* 飯店目前圖片預覽與一鍵智能換圖列 */}
+            <div className="p-2.5 rounded-2xl bg-[#F4FAF6] border border-[#DCEAE2] flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <img
+                  src={state.stay.photoUrl}
+                  alt={state.stay.hotelName}
+                  className="w-12 h-12 rounded-xl object-cover shrink-0 border border-[#CFE3D8]"
+                  referrerPolicy="no-referrer"
+                />
+                <div className="min-w-0">
+                  <div className="text-[11.5px] font-extrabold text-[#14241D] truncate">
+                    飯店封面圖片
+                  </div>
+                  <div className="text-[10.5px] text-[#5B7368] truncate">
+                    點擊右側按鈕可根據飯店自動配圖或切換照片
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={isSearchingStayPhoto}
+                onClick={() => handleAutoFindStayPhoto()}
+                className="px-3 py-1.5 rounded-xl bg-white hover:bg-[#EAF4EF] border border-[#CFE3D8] text-[#1A5D42] text-[11px] font-extrabold shrink-0 flex items-center gap-1 shadow-2xs transition disabled:opacity-50"
+              >
+                {isSearchingStayPhoto ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <ImageIcon className="w-3.5 h-3.5" />
+                )}
+                <span>換一張</span>
+              </button>
             </div>
 
             {/* 若發現多個分館或多個符合地址，跳出選擇卡片 */}
@@ -5621,7 +5892,8 @@ export default function App() {
                           },
                         }));
                         setHotelCandidates([]);
-                        showToast(`✅ 已套用「${cand.name}」的地址！`);
+                        showToast(`✅ 已套用「${cand.name}」的地址並自動配圖！`);
+                        handleAutoFindStayPhoto(cand.name, cand.address);
                       }}
                       className="w-full p-2.5 rounded-xl bg-white hover:bg-[#EAF4EF] border border-[#E6D5CE] hover:border-[#1A5D42] text-left transition group"
                     >
@@ -5725,10 +5997,13 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => setShowStayModal(false)}
+              onClick={async () => {
+                setShowStayModal(false);
+                await handleAutoFindStayPhoto(state.stay.hotelName, state.stay.address);
+              }}
               className="w-full py-2.5 rounded-xl bg-[#1A5D42] text-white font-extrabold text-sm mt-2"
             >
-              儲存住宿設定
+              儲存住宿設定並自動配圖
             </button>
           </div>
         </div>
@@ -6442,7 +6717,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 16. ⚠️ 沒有設定 Gemini API Key 時的明確提示視窗 */}
+      {/* 16. ⚠️ Gemini API Key 設定位置說明與狀態提示視窗 */}
       {missingApiKeyModalMsg && (
         <div
           className="fixed inset-0 z-[240] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
@@ -6450,19 +6725,23 @@ export default function App() {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#F5D0A9] space-y-3.5"
+            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#F5D0A9] space-y-3.5 max-h-[88vh] overflow-y-auto tabi-scroll"
           >
             <div className="flex items-start justify-between gap-2 border-b border-[#FDEBD0] pb-2.5">
               <div className="flex items-center gap-2">
                 <span className="w-9 h-9 rounded-2xl bg-[#FFF3E0] text-[#D97706] flex items-center justify-center text-lg shrink-0">
-                  ⚠️
+                  {geminiConfigured ? '🤖' : '🔑'}
                 </span>
                 <div>
                   <h3 className="text-base font-extrabold text-[#14241D]">
-                    尚未設定 Gemini API Key
+                    {geminiConfigured
+                      ? 'Gemini AI 已連線就緒'
+                      : 'Gemini API Key 設定位置說明'}
                   </h3>
                   <p className="text-[11px] text-[#9A3412] font-bold">
-                    目前無法使用 Gemini AI 進階功能
+                    {geminiConfigured
+                      ? '伺服器端已設定 GEMINI_API_KEY'
+                      : '為防金鑰外洩，API Key 設於伺服器環境變數'}
                   </p>
                 </div>
               </div>
@@ -6479,12 +6758,41 @@ export default function App() {
               {missingApiKeyModalMsg}
             </div>
 
+            {/* 詳細設定位置教學 */}
+            <div className="p-3.5 rounded-2xl bg-[#F4FAF6] border border-[#DCEAE2] space-y-2.5 text-[11.5px] text-[#14241D]">
+              <div className="font-black text-[#1A5D42] flex items-center gap-1.5">
+                <span>📍</span>
+                <span>在哪裡輸入 GEMINI_API_KEY？</span>
+              </div>
+
+              <div className="space-y-1 bg-white p-2.5 rounded-xl border border-[#E2EFE8]">
+                <div className="font-extrabold text-[#165C3E]">
+                  方法 1：在 Google AI Studio 預覽環境
+                </div>
+                <p className="text-[11px] text-[#4A6357] leading-snug">
+                  點選 AI Studio 介面左上或側邊的 <b>Settings (設定) ➔ Secrets (密鑰)</b>，將您的金鑰填入 <b>GEMINI_API_KEY</b> 即可立即生效。
+                </p>
+              </div>
+
+              <div className="space-y-1 bg-white p-2.5 rounded-xl border border-[#E2EFE8]">
+                <div className="font-extrabold text-[#B8431F]">
+                  方法 2：在 GitHub + Vercel 部署環境
+                </div>
+                <p className="text-[11px] text-[#4A6357] leading-snug">
+                  1. 進入 <b>Vercel Dashboard</b> 點選您的專案 (amazing-travel)<br />
+                  2. 點選上方 <b>Settings ➔ Environment Variables</b><br />
+                  3. 新增 Key 名稱填 <b>GEMINI_API_KEY</b>，Value 貼上您的 API Key<br />
+                  4. 儲存後到 <b>Deployments</b> 點擊 <b>Redeploy</b> 即完成！
+                </p>
+              </div>
+            </div>
+
             <div className="p-3 rounded-2xl bg-[#EAF4EF] border border-[#CFE3D8] text-[11px] font-semibold text-[#1A5D42] space-y-1">
               <div className="font-extrabold">
-                ✅ 離線後備功能狀態：{geminiConfigured ? 'AI 已就緒' : '100% 離線後備運作中'}
+                ✅ 離線後備功能狀態：{geminiConfigured ? 'AI + 離線雙引擎運作中' : '100% 離線後備運作中'}
               </div>
               <p className="text-[#355245] leading-snug">
-                即使未設定 Gemini API Key，本 App 的所有核心功能（手動快速記帳、離線地理時段排程、內建日英手指溝通卡、航班與飯店地址查詢）皆可 100% 正常使用！
+                即使未設定 Gemini API Key，本 App 的所有核心功能（手動快速記帳、離線地理時段排程、內建日英手指溝通卡、航班與飯店地址查詢、飯店智能換圖）皆可 100% 正常使用！
               </p>
             </div>
 

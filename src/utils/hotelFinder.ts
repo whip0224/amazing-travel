@@ -10,14 +10,14 @@ export interface HotelCandidate {
 // 內建熱門亞洲/日本/台灣/韓國連鎖與公寓式飯店資料庫
 // (包含使用者測試的 Weekly Green In Namba ウィークリーグリーンインなんば 及難波/心齋橋/梅田/京都/東京熱門住宿)
 const BUILTIN_HOTEL_DIRECTORY: HotelCandidate[] = [
-  // Weekly Green In Namba (ウィークリーグリーンインなんば)
+  // Weekly Green In Namba (ウィークリーグリーン in なんば)
   {
     id: 'weekly-green-namba',
-    name: 'Weekly Green In Namba (ウィークリーグリーンインなんば)',
+    name: 'Weekly Green In Namba (ウィークリーグリーン in なんば)',
     branchNote: '大阪難波・大國町館',
-    address: '〒556-0011 大阪府大阪市浪速区難波中3-12-9 (3-12-9 Nanbanaka, Naniwa Ward, Osaka)',
-    lat: 34.6611,
-    lng: 135.4986,
+    address: '〒556-0013 大阪府大阪市浪速区戎本町1-7-23 (2 Chome-7-23 Shikitsunishi, Naniwa Ward, Osaka)',
+    lat: 34.6566,
+    lng: 135.4981,
   },
 
   // 大阪難波・心齋橋・道頓堀・梅田熱門飯店
@@ -86,12 +86,68 @@ const BUILTIN_HOTEL_DIRECTORY: HotelCandidate[] = [
     lng: 135.4988,
   },
   {
+    id: 'vessel-inn-namba',
+    name: 'Vessel Inn Namba (ベッセルインなんば)',
+    branchNote: '大阪難波・道頓堀館',
+    address: '2 Chome-2-18 Dotonbori, Chuo Ward, Osaka, 542-0071日本 (〒542-0071 大阪府大阪市中央区道頓堀2-2-18)',
+    lat: 34.6687,
+    lng: 135.4998,
+  },
+  {
     id: 'vessel-inn-shinsaibashi',
-    name: 'Vessel Inn Shinsaibashi (心齋橋船舶酒店)',
-    branchNote: '大阪心齋橋北館',
-    address: '〒542-0081 大阪府大阪市中央区南船場2-12-11',
+    name: 'Vessel Inn Shinsaibashi (ベッセルイン心斎橋)',
+    branchNote: '大阪心齋橋館',
+    address: '〒542-0081 大阪府大阪市中央区南船場2-12-11 (2 Chome-12-11 Minamisenba, Chuo Ward, Osaka)',
     lat: 34.6765,
     lng: 135.5035,
+  },
+  {
+    id: 'vessel-campana-kyoto',
+    name: 'Vessel Hotel Campana Kyoto Gojo (ベッセルホテルカンパーナ京都五条)',
+    branchNote: '京都五條館',
+    address: '〒600-8180 京都府京都市下京区東洞院通五条下る下万寿寺町498',
+    lat: 34.9956,
+    lng: 135.7605,
+  },
+  {
+    id: 'forza-osaka-namba',
+    name: 'Hotel Forza Osaka Namba Dotonbori (ホテルフォルツァ大阪なんば道頓堀)',
+    branchNote: '大阪道頓堀商店街館',
+    address: '〒542-0071 大阪府大阪市中央区道頓堀1-4-22 (1 Chome-4-22 Dotonbori, Chuo Ward, Osaka)',
+    lat: 34.6688,
+    lng: 135.5032,
+  },
+  {
+    id: 'holiday-inn-osaka-namba',
+    name: 'Holiday Inn Osaka Namba (大阪難波假日酒店)',
+    branchNote: '大阪道頓堀・宗右衛門町館',
+    address: '〒542-0084 大阪府大阪市中央区宗右衛門町5-15 (5-15 Soemoncho, Chuo Ward, Osaka)',
+    lat: 34.6694,
+    lng: 135.5035,
+  },
+  {
+    id: 'mercure-tokyu-stay-namba',
+    name: 'Mercure Tokyu Stay Osaka Namba (大阪難波東急Stay美居酒店)',
+    branchNote: '大阪心齋橋・御堂筋館',
+    address: '〒542-0086 大阪府大阪市中央区西心斎橋2-2-4 (2 Chome-2-4 Nishishinsaibashi, Chuo Ward, Osaka)',
+    lat: 34.6705,
+    lng: 135.4998,
+  },
+  {
+    id: 'royal-classic-osaka',
+    name: 'Hotel Royal Classic Osaka (大阪皇家經典酒店)',
+    branchNote: '難波站直結新歌舞伎座',
+    address: '〒542-0076 大阪府大阪市中央区難波4-3-3 (4 Chome-3-3 Namba, Chuo Ward, Osaka)',
+    lat: 34.6656,
+    lng: 135.5008,
+  },
+  {
+    id: 'centara-grand-osaka',
+    name: 'Centara Grand Hotel Osaka (大阪盛泰瀾大酒店)',
+    branchNote: '難波 Parks South 館',
+    address: '〒556-0011 大阪府大阪市浪速区難波中2-11-50 (2 Chome-11-50 Nanbanaka, Naniwa Ward, Osaka)',
+    lat: 34.6606,
+    lng: 135.5021,
   },
   {
     id: 'hankyu-respire-osaka',
@@ -614,59 +670,165 @@ export async function searchHotelCandidates(
       }
     }
 
-    // 2A. 優先查詢 OpenStreetMap Nominatim
+    // 輔助驗證：確保 Nominatim / Photon 回傳的候選地點符合所有核心關鍵字（避免搜尋 VESSEL INN NAMBA 卻回傳福岡、東京、廣島的 Vessel Inn 或無關的 Nissin Namba Inn）
+    const matchesAllCoreTokens = (candidateHaystack: string): boolean => {
+      if (meaningfulKeywords.length <= 1) return true;
+      const hayLower = candidateHaystack.toLowerCase();
+      return meaningfulKeywords.every((kw) => {
+        if (hayLower.includes(kw)) return true;
+        const jaEquiv = EN_TO_JA_TOKEN_MAP[kw];
+        if (jaEquiv && hayLower.includes(jaEquiv.toLowerCase())) return true;
+        // namba 飯店常位於道頓堀 (Dotonbori)、心齋橋、大阪市中央區或浪速區
+        if (
+          (kw === 'namba' || kw === 'nanba') &&
+          (hayLower.includes('難波') ||
+            hayLower.includes('なんば') ||
+            hayLower.includes('道頓堀') ||
+            hayLower.includes('dotonbori') ||
+            hayLower.includes('浪速区') ||
+            hayLower.includes('中央区'))
+        ) {
+          return true;
+        }
+        return false;
+      });
+    };
+
+    // 2A. 若瀏覽器已載入 Google Maps Places Service (VITE_GOOGLE_MAPS_API_KEY)，第一優先查詢 Google Maps 官方資料庫
     try {
-      for (const queryStr of searchQueries.slice(0, 4)) {
-        const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=5&accept-language=zh-TW,ja,en&q=${encodeURIComponent(
-          queryStr
-        )}`;
-        const res = await fetch(url);
-        if (!res.ok) continue;
-        const data = await res.json();
-        if (!Array.isArray(data)) continue;
-
-        data.forEach((row: any, idx: number) => {
-          const dispName: string = row.display_name || '';
-          if (!dispName) return;
-
-          const parts = dispName.split(',').map((s: string) => s.trim());
-          const mainName = row.name || parts[0] || q;
-          const dedupeKey = parts.slice(0, 4).join(', ') || dispName;
-
-          if (seenAddresses.has(dedupeKey)) return;
-          seenAddresses.add(dedupeKey);
-
-          const cityOrSuburb =
-            row.address?.city ||
-            row.address?.ward ||
-            row.address?.suburb ||
-            row.address?.town ||
-            parts[1] ||
-            '';
-
-          results.push({
-            id: `nom-${row.place_id || idx}-${Date.now()}`,
-            name: mainName,
-            branchNote: cityOrSuburb ? `${cityOrSuburb}` : undefined,
-            address: dispName,
-            lat: row.lat ? Number(row.lat) : undefined,
-            lng: row.lon ? Number(row.lon) : undefined,
+      const g = (window as any).google;
+      if (g?.maps?.places?.PlacesService) {
+        const dummy = document.createElement('div');
+        const service = new g.maps.places.PlacesService(dummy);
+        const gResults = await new Promise<HotelCandidate[]>((resolve) => {
+          const timer = setTimeout(() => resolve([]), 2000);
+          service.textSearch({ query: q }, (places: any, status: any) => {
+            clearTimeout(timer);
+            if (status === g.maps.places.PlacesServiceStatus.OK && Array.isArray(places)) {
+              resolve(
+                places.slice(0, 5).map((p: any, i: number) => ({
+                  id: p.place_id || `gplace-${i}`,
+                  name: p.name || q,
+                  branchNote: p.rating ? `Google Maps ⭐ ${p.rating}` : 'Google Maps 官方地標',
+                  address: p.formatted_address || '',
+                  lat:
+                    typeof p.geometry?.location?.lat === 'function'
+                      ? p.geometry.location.lat()
+                      : undefined,
+                  lng:
+                    typeof p.geometry?.location?.lng === 'function'
+                      ? p.geometry.location.lng()
+                      : undefined,
+                }))
+              );
+            } else {
+              resolve([]);
+            }
           });
         });
 
-        if (results.length >= 4) break;
+        gResults.forEach((gr) => {
+          if (gr.address && !seenAddresses.has(gr.address)) {
+            seenAddresses.add(gr.address);
+            results.push(gr);
+          }
+        });
       }
     } catch {
-      // ignore Nominatim error and continue to Photon fallback
+      // ignore Google Maps JS SDK error and continue to server lookup
     }
 
-    // 2B. 若 Nominatim 因嚴格關鍵字匹配無結果，自動改用 Photon 模糊地理檢索 API (支援拼字容錯與部分詞彙匹配)
+    // 2B. 若尚未取得地址，呼叫後端真實飯店地址檢索 (/api/gemini action: 'hotel_address'，整合 Google Places REST + Gemini AI + Yahoo 檢索)
+    if (results.length === 0) {
+      try {
+        const srvRes = await fetch('/api/gemini', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'hotel_address',
+            query: q,
+          }),
+        });
+        if (srvRes.ok) {
+          const srvData = await srvRes.json();
+          if (Array.isArray(srvData?.candidates)) {
+            srvData.candidates.forEach((cand: any, idx: number) => {
+              if (cand?.address && !seenAddresses.has(cand.address)) {
+                seenAddresses.add(cand.address);
+                results.push({
+                  id: `srv-addr-${idx}-${Date.now()}`,
+                  name: cand.name || q,
+                  branchNote: cand.branchNote || '官方登錄地址',
+                  address: cand.address,
+                  lat: typeof cand.lat === 'number' ? cand.lat : undefined,
+                  lng: typeof cand.lng === 'number' ? cand.lng : undefined,
+                });
+              }
+            });
+          }
+        }
+      } catch {
+        // ignore server address lookup errors
+      }
+    }
+
+    // 2C. 若仍無結果，再查詢 OpenStreetMap Nominatim（並以 matchesAllCoreTokens 嚴格過濾）
+    if (results.length === 0) {
+      try {
+        for (const queryStr of searchQueries.slice(0, 4)) {
+          const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=5&accept-language=zh-TW,ja,en&q=${encodeURIComponent(
+            queryStr
+          )}`;
+          const res = await fetch(url);
+          if (!res.ok) continue;
+          const data = await res.json();
+          if (!Array.isArray(data)) continue;
+
+          data.forEach((row: any, idx: number) => {
+            const dispName: string = row.display_name || '';
+            if (!dispName) return;
+
+            const parts = dispName.split(',').map((s: string) => s.trim());
+            const mainName = row.name || parts[0] || q;
+            if (!matchesAllCoreTokens(`${mainName} ${dispName}`)) return;
+
+            const dedupeKey = parts.slice(0, 4).join(', ') || dispName;
+
+            if (seenAddresses.has(dedupeKey)) return;
+            seenAddresses.add(dedupeKey);
+
+            const cityOrSuburb =
+              row.address?.city ||
+              row.address?.ward ||
+              row.address?.suburb ||
+              row.address?.town ||
+              parts[1] ||
+              '';
+
+            results.push({
+              id: `nom-${row.place_id || idx}-${Date.now()}`,
+              name: mainName,
+              branchNote: cityOrSuburb ? `${cityOrSuburb}` : undefined,
+              address: dispName,
+              lat: row.lat ? Number(row.lat) : undefined,
+              lng: row.lon ? Number(row.lon) : undefined,
+            });
+          });
+
+          if (results.length >= 4) break;
+        }
+      } catch {
+        // ignore Nominatim error and continue to Photon fallback
+      }
+    }
+
+    // 2D. 若仍無結果，改用 Photon 模糊地理檢索 API 並嚴格過濾核心關鍵字（剔除其他城市分館）
     if (results.length === 0) {
       try {
         for (const queryStr of searchQueries.slice(0, 3)) {
           const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(
             queryStr
-          )}&limit=5`;
+          )}&limit=8`;
           const res = await fetch(photonUrl);
           if (!res.ok) continue;
           const geojson = await res.json();
@@ -691,6 +853,8 @@ export async function searchHotelCandidates(
 
             const formattedAddr =
               addressParts.length > 0 ? addressParts.join(' ') : `${name} (${props.city || ''})`;
+
+            if (!matchesAllCoreTokens(`${name} ${formattedAddr}`)) return;
             if (seenAddresses.has(formattedAddr)) return;
             seenAddresses.add(formattedAddr);
 
@@ -710,42 +874,6 @@ export async function searchHotelCandidates(
         // ignore Photon error
       }
     }
-  }
-
-  // 3. 若瀏覽器已載入 Google Maps Places Service，也一併查詢補充
-  try {
-    const g = (window as any).google;
-    if (g?.maps?.places?.PlacesService) {
-      const dummy = document.createElement('div');
-      const service = new g.maps.places.PlacesService(dummy);
-      const gResults = await new Promise<HotelCandidate[]>((resolve) => {
-        const timer = setTimeout(() => resolve([]), 1600);
-        service.textSearch({ query: q }, (places: any, status: any) => {
-          clearTimeout(timer);
-          if (status === g.maps.places.PlacesServiceStatus.OK && Array.isArray(places)) {
-            resolve(
-              places.slice(0, 5).map((p: any, i: number) => ({
-                id: p.place_id || `gplace-${i}`,
-                name: p.name || q,
-                branchNote: p.rating ? `⭐ ${p.rating}` : undefined,
-                address: p.formatted_address || '',
-              }))
-            );
-          } else {
-            resolve([]);
-          }
-        });
-      });
-
-      gResults.forEach((gr) => {
-        if (gr.address && !seenAddresses.has(gr.address)) {
-          seenAddresses.add(gr.address);
-          results.push(gr);
-        }
-      });
-    }
-  } catch {
-    // ignore
   }
 
   // 4. 商圈智慧保底：若輸入的是小型民宿/新開業公寓且名稱含有商圈地名 (如 Namba、Shinjuku、Umeda 等)，自動提供該商圈定位地址

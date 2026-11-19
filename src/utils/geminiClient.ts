@@ -116,21 +116,34 @@ export async function callGeminiEndpoint<T>(
       body: JSON.stringify(payload),
     });
 
-    const json = await res.json().catch(() => ({}));
+    const rawText = await res.text().catch(() => '');
+    let json: any = {};
+    if (rawText) {
+      try {
+        json = JSON.parse(rawText);
+      } catch {
+        json = {};
+      }
+    }
 
     if (!res.ok || json?.error) {
       const isMissingKey =
         res.status === 503 ||
         json?.errorCode === 'MISSING_API_KEY' ||
         json?.errorCode === 'INVALID_API_KEY';
+      const fallbackText =
+        !json?.message && rawText
+          ? `伺服器回應異常 (HTTP ${res.status})：${rawText.replace(/<[^>]+>/g, ' ').trim().slice(0, 140)}`
+          : '';
       return {
         ok: false,
         missingApiKey: isMissingKey,
         errorMessage:
           json?.message ||
+          fallbackText ||
           (isMissingKey
             ? '尚未設定 Gemini API Key，無法使用 AI 功能。請在 Settings > Secrets 或環境變數設定 GEMINI_API_KEY。'
-            : '呼叫 Gemini AI 服務失敗，請稍後再試。'),
+            : `呼叫 Gemini AI 服務失敗 (HTTP ${res.status})，請稍後再試。`),
       };
     }
 
