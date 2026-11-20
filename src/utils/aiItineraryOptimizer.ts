@@ -1,5 +1,9 @@
 import type { SavedDestination } from '../types/tabi';
-import { optimizeItineraryViaServer } from './geminiClient';
+import {
+  optimizeItineraryViaServer,
+  getPreferredGeminiModel,
+  type GeminiModelOption,
+} from './geminiClient';
 
 export interface TripDayOption {
   index: number;
@@ -440,7 +444,8 @@ export function runSmartGeoTimeOptimization(
 export async function optimizeItineraryWithAI(
   destinations: SavedDestination[],
   tripDays: TripDayOption[],
-  mode: OptimizeMode
+  mode: OptimizeMode,
+  preferredModel?: GeminiModelOption
 ): Promise<AIOptimizationResult> {
   // 先執行本地高精度地理與時段演算法作為基準結果 (同時確保毫秒級保底與離線可用)
   const baseResult = runSmartGeoTimeOptimization(destinations, tripDays, mode);
@@ -475,7 +480,8 @@ export async function optimizeItineraryWithAI(
       zhDisp: d.zhDisp,
     }));
 
-    const res = await optimizeItineraryViaServer(placesPayload, daysPayload, mode);
+    const activeModel = preferredModel || getPreferredGeminiModel();
+    const res = await optimizeItineraryViaServer(placesPayload, daysPayload, mode, activeModel);
 
     if (!res.ok || !res.data) {
       return {
@@ -530,9 +536,11 @@ export async function optimizeItineraryWithAI(
       suggestionsByDay[idx].sort((a, b) => a.start.localeCompare(b.start));
     });
 
+    const finalModelLabel = res.modelUsed || activeModel;
+
     return {
       ...baseResult,
-      summaryTitle: '🤖 Gemini AI 智慧動線 & 黃金時段優化建議',
+      summaryTitle: `🤖 Gemini AI (${finalModelLabel}) 智慧動線優化建議`,
       summaryPoints:
         Array.isArray(parsed.summaryPoints) && parsed.summaryPoints.length > 0
           ? parsed.summaryPoints

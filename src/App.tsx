@@ -93,6 +93,11 @@ import {
   checkGeminiStatus,
   scanReceiptWithGemini,
   generateSmartPhraseWithGemini,
+  getPreferredGeminiModel,
+  setPreferredGeminiModel,
+  DEFAULT_GEMINI_MODEL,
+  COMPLEX_GEMINI_MODEL,
+  type GeminiModelOption,
   type ScannedReceiptResult,
 } from './utils/geminiClient';
 
@@ -539,6 +544,13 @@ export default function App() {
 
   // --- 🤖 Gemini AI 狀態、拍收據自動記帳、AI 情境溝通卡與缺少 API Key 提示 ---
   const [geminiConfigured, setGeminiConfigured] = useState<boolean | null>(null);
+  const [preferredGeminiModel, setPreferredGeminiModelState] = useState<GeminiModelOption>(() =>
+    getPreferredGeminiModel()
+  );
+  const handleSelectGeminiModel = (model: GeminiModelOption) => {
+    setPreferredGeminiModel(model);
+    setPreferredGeminiModelState(model);
+  };
   const [missingApiKeyModalMsg, setMissingApiKeyModalMsg] = useState<string | null>(null);
   const [isScanningReceipt, setIsScanningReceipt] = useState<boolean>(false);
   const [scannedReceiptData, setScannedReceiptData] = useState<ScannedReceiptResult | null>(null);
@@ -2187,17 +2199,29 @@ export default function App() {
   };
 
   // --- 🤖 AI 行程優化：分析目的地清單、建議最佳訪問順序與自動分配未排程景點時段 ---
-  const handleOpenAIOptimizer = async (modeOverride?: OptimizeMode) => {
+  const handleOpenAIOptimizer = async (
+    modeOverride?: OptimizeMode,
+    modelOverride?: GeminiModelOption
+  ) => {
     if (state.destinations.length === 0) {
       showToast('⚠️ 目的地清單目前為空，請先加入幾個景點再執行 AI 優化！');
       return;
     }
     const targetMode = modeOverride || aiOptimizeMode;
+    const targetModel = modelOverride || preferredGeminiModel;
+    if (modelOverride) {
+      handleSelectGeminiModel(modelOverride);
+    }
     setAiOptimizeMode(targetMode);
     setShowAIOptimizeModal(true);
     setIsRunningAIOptimize(true);
     try {
-      const result = await optimizeItineraryWithAI(state.destinations, tripDays, targetMode);
+      const result = await optimizeItineraryWithAI(
+        state.destinations,
+        tripDays,
+        targetMode,
+        targetModel
+      );
       setAiOptResult(result);
     } catch (err) {
       console.error('AI optimize error:', err);
@@ -6504,6 +6528,35 @@ export default function App() {
                   🔄 全行程依分區重新分配
                 </button>
               </div>
+
+              {/* AI 模型引擎切換：預設 gemini-3.5-flash-lite（快速抗 503），複雜推理可切換 gemini-3.8-flash */}
+              <div className="flex items-center justify-between gap-2 bg-black/15 px-2.5 py-1.5 rounded-2xl text-[10.5px]">
+                <span className="font-bold text-white/90 shrink-0">推理模型：</span>
+                <div className="flex items-center gap-1 flex-1 justify-end">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenAIOptimizer(aiOptimizeMode, DEFAULT_GEMINI_MODEL)}
+                    className={`px-2 py-1 rounded-lg font-extrabold transition ${
+                      preferredGeminiModel === DEFAULT_GEMINI_MODEL
+                        ? 'bg-[#D8F3E5] text-[#154A34] shadow-xs'
+                        : 'text-white/80 hover:bg-white/10'
+                    }`}
+                  >
+                    ⚡ 3.5-flash-lite (預設)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenAIOptimizer(aiOptimizeMode, COMPLEX_GEMINI_MODEL)}
+                    className={`px-2 py-1 rounded-lg font-extrabold transition ${
+                      preferredGeminiModel === COMPLEX_GEMINI_MODEL
+                        ? 'bg-[#FCD581] text-[#5C3A00] shadow-xs'
+                        : 'text-white/80 hover:bg-white/10'
+                    }`}
+                  >
+                    🧠 3.8-flash (深度推理)
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* 內容分析區 */}
@@ -6512,20 +6565,24 @@ export default function App() {
                 <div className="py-12 text-center space-y-3">
                   <Loader2 className="w-8 h-8 text-[#1A5D42] animate-spin mx-auto" />
                   <div className="text-sm font-extrabold text-[#14241D]">
-                    AI 正在分析目的地經緯度、營業時間與最佳時段...
+                    AI ({preferredGeminiModel}) 正在分析目的地經緯度與最佳時段...
                   </div>
                   <p className="text-xs text-[#5B7368]">
-                    正在為未安排時間的景點計算最順路的造訪順序
+                    正在為未安排時間的景點計算最順路的造訪順序（含 429 / 503 自動重試保護）
                   </p>
                 </div>
               ) : (
                 <>
-                  {/* ⚠️ 若尚未設定 Gemini API Key，顯示提示並說明已自動使用離線引擎後備 */}
+                  {/* ⚠️ 若尚未設定 Gemini API Key 或遇到 429/503，顯示提示並說明已自動使用離線引擎後備 */}
                   {aiOptResult.missingApiKeyNotice && (
                     <div className="p-3 rounded-2xl bg-[#FFF6ED] border border-[#F5D0A9] text-[#9A3412] space-y-1">
                       <div className="text-xs font-extrabold flex items-center gap-1.5">
                         <span>⚠️</span>
-                        <span>尚未設定 Gemini API Key，無法使用 Gemini AI 模型</span>
+                        <span>
+                          {aiOptResult.missingApiKeyNotice.includes('API Key')
+                            ? 'Gemini API Key 未就緒，已改用離線引擎後備'
+                            : '已自動切換為「內建離線地理時段引擎」後備排程'}
+                        </span>
                       </div>
                       <p className="text-[11px] font-semibold leading-snug text-[#7C2D12]">
                         {aiOptResult.missingApiKeyNotice}
@@ -6760,6 +6817,61 @@ export default function App() {
 
             <div className="p-3 rounded-2xl bg-[#FFF8F1] border border-[#F5D0A9] text-xs font-bold text-[#7C2D12] leading-relaxed">
               {missingApiKeyModalMsg}
+            </div>
+
+            {/* AI 模型偏好與 429/503 重試機制設定 */}
+            <div className="p-3.5 rounded-2xl bg-[#F4FAF6] border border-[#DCEAE2] space-y-2 text-[11.5px] text-[#14241D]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-black text-[#1A5D42] flex items-center gap-1.5">
+                  <span>🤖</span>
+                  <span>Gemini AI 模型切換</span>
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-[#D8F3E5] text-[#15563B] text-[10px] font-extrabold">
+                  已啟用 429 / 503 自動重試
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handleSelectGeminiModel(DEFAULT_GEMINI_MODEL)}
+                  className={`p-2 rounded-xl border text-left transition ${
+                    preferredGeminiModel === DEFAULT_GEMINI_MODEL
+                      ? 'bg-[#1A5D42] text-white border-[#1A5D42] shadow-xs'
+                      : 'bg-white text-[#14241D] border-[#DCEAE2] hover:bg-[#EAF4EF]'
+                  }`}
+                >
+                  <div className="font-extrabold text-[11px]">⚡ gemini-3.5-flash-lite</div>
+                  <div
+                    className={`text-[10px] mt-0.5 leading-tight ${
+                      preferredGeminiModel === DEFAULT_GEMINI_MODEL
+                        ? 'text-white/85'
+                        : 'text-[#5B7368]'
+                    }`}
+                  >
+                    預設推薦・速度最快、較不易 503
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelectGeminiModel(COMPLEX_GEMINI_MODEL)}
+                  className={`p-2 rounded-xl border text-left transition ${
+                    preferredGeminiModel === COMPLEX_GEMINI_MODEL
+                      ? 'bg-[#1A5D42] text-white border-[#1A5D42] shadow-xs'
+                      : 'bg-white text-[#14241D] border-[#DCEAE2] hover:bg-[#EAF4EF]'
+                  }`}
+                >
+                  <div className="font-extrabold text-[11px]">🧠 gemini-3.8-flash</div>
+                  <div
+                    className={`text-[10px] mt-0.5 leading-tight ${
+                      preferredGeminiModel === COMPLEX_GEMINI_MODEL
+                        ? 'text-white/85'
+                        : 'text-[#5B7368]'
+                    }`}
+                  >
+                    複雜推理・多日動線細部規劃
+                  </div>
+                </button>
+              </div>
             </div>
 
             {/* 詳細設定位置教學 */}

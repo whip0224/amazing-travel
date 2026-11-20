@@ -1,5 +1,10 @@
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 
+export type GeminiModelId = 'gemini-3.5-flash-lite' | 'gemini-3.8-flash';
+
+export const DEFAULT_FAST_MODEL: GeminiModelId = 'gemini-3.5-flash-lite';
+export const COMPLEX_REASONING_MODEL: GeminiModelId = 'gemini-3.8-flash';
+
 export interface GeminiRequestPayload {
   action:
     | 'status'
@@ -9,6 +14,7 @@ export interface GeminiRequestPayload {
     | 'hotel_photo'
     | 'hotel_address';
   mode?: 'fill_and_reorder' | 'rebalance_all';
+  preferredModel?: GeminiModelId;
   days?: unknown[];
   places?: unknown[];
   imageBase64?: string;
@@ -34,6 +40,16 @@ function getServerGoogleMapsApiKey(): string {
   ).trim();
 }
 
+function resolveRequestedModel(
+  preferredModel?: unknown,
+  fallback: GeminiModelId = DEFAULT_FAST_MODEL
+): GeminiModelId {
+  if (preferredModel === 'gemini-3.8-flash' || preferredModel === 'gemini-3.5-flash-lite') {
+    return preferredModel;
+  }
+  return fallback;
+}
+
 function createGenAIClient(apiKey: string, vertexai = false): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
@@ -46,27 +62,106 @@ function createGenAIClient(apiKey: string, vertexai = false): GoogleGenAI {
   });
 }
 
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatusError(err: any): boolean {
+  const status = Number(err?.status) || 0;
+  const msg = String(err?.message || err || '');
+  return (
+    status === 429 ||
+    status === 503 ||
+    status === 502 ||
+    status === 504 ||
+    msg.includes('429') ||
+    msg.includes('503') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('UNAVAILABLE') ||
+    msg.toLowerCase().includes('overloaded') ||
+    msg.toLowerCase().includes('rate limit')
+  );
+}
+
+function isThinkingConfigUnsupportedError(err: any): boolean {
+  const status = Number(err?.status) || 0;
+  const msg = String(err?.message || err || '').toLowerCase();
+  return status === 400 && (msg.includes('thinking') || msg.includes('budget'));
+}
+
 async function generateContentSmart(
   apiKey: string,
   params: {
-    model: string;
+    model: GeminiModelId;
     contents: any;
     config?: any;
   }
-) {
+): Promise<{ response: any; modelUsed: string; retriedCount: number }> {
   const isAQ = apiKey.startsWith('AQ.');
-  // 依序嘗試：
-  // 1. Google AI Studio 標準端點 (generativelanguage.googleapis.com, vertexai: false)
-  // 2. 若為 AQ. 開頭且標準端點失敗，自動嘗試 Vertex AI Express Mode 端點 (aiplatform.googleapis.com, vertexai: true)
-  const vertexModes = isAQ ? [false, true] : [false];
-  let lastError: any = null;
+  // 若使用者要求深度推理模型 gemini-3.8-flash，仍遇到持續 503/429 時自動降級回快速穩定的 gemini-3.5-flash-lite
+  const modelChain: GeminiModelId[] =
+    params.model === COMPLEX_REASONING_MODEL
+      ? [COMPLEX_REASONING_MODEL, DEFAULT_FAST_MODEL]
+      : [DEFAULT_FAST_MODEL];
 
-  for (const useVertex of vertexModes) {
-    try {
-      const client = createGenAIClient(apiKey, useVertex);
-      return await client.models.generateContent(params);
-    } catch (err: any) {
-      lastError = err;
+  const maxAttemptsPerModel = 3; // 初次 + 最多 2 次針對 429 / 503 指數退避重試
+  let lastError: any = null;
+  let retriedCount = 0;
+
+  for (const targetModel of modelChain) {
+    // 針對 *-lite 模型不強制帶入 thinkingConfig，避免不支援參數的 400 錯誤
+    let baseConfig = params.config ? { ...params.config } : undefined;
+    if (baseConfig && targetModel === DEFAULT_FAST_MODEL && 'thinkingConfig' in baseConfig) {
+      delete baseConfig.thinkingConfig;
+    }
+
+    for (let attempt = 1; attempt <= maxAttemptsPerModel; attempt++) {
+      try {
+        const client = createGenAIClient(apiKey, false);
+        const response = await client.models.generateContent({
+          model: targetModel,
+          contents: params.contents,
+          config: baseConfig,
+        });
+        return { response, modelUsed: targetModel, retriedCount };
+      } catch (err: any) {
+        lastError = err;
+
+        // 若模型不支援 thinkingConfig，立即移除並立刻重試同一模型
+        if (baseConfig && 'thinkingConfig' in baseConfig && isThinkingConfigUnsupportedError(err)) {
+          const { thinkingConfig: _removed, ...restConfig } = baseConfig;
+          baseConfig = restConfig;
+          retriedCount += 1;
+          continue;
+        }
+
+        // 若為 AQ. 金鑰且在標準端點遇到 401/403，嘗試一次 Vertex Express 端點
+        const errStatus = Number(err?.status) || 0;
+        if (isAQ && (errStatus === 401 || errStatus === 403)) {
+          try {
+            const vertexClient = createGenAIClient(apiKey, true);
+            const response = await vertexClient.models.generateContent({
+              model: targetModel,
+              contents: params.contents,
+              config: baseConfig,
+            });
+            return { response, modelUsed: targetModel, retriedCount };
+          } catch (vErr: any) {
+            lastError = vErr;
+          }
+        }
+
+        // 針對 429 (頻率/配額限制) 與 503 (伺服器暫時忙碌) 執行自動指數退避重試
+        if (isRetryableStatusError(err) && attempt < maxAttemptsPerModel) {
+          retriedCount += 1;
+          const jitter = Math.floor(Math.random() * 250);
+          const backoffMs = attempt === 1 ? 800 + jitter : 1800 + jitter;
+          await sleepMs(backoffMs);
+          continue;
+        }
+
+        break;
+      }
     }
   }
 
@@ -238,8 +333,8 @@ async function searchRealHotelAddresses(
   // 3. 若已設定 GEMINI_API_KEY，交由 Gemini AI 結合即時網頁摘要精準解析全球任何飯店的 Google Maps 格式地址（永久免手動內建）
   if (geminiApiKey) {
     try {
-      const response = await generateContentSmart(geminiApiKey, {
-        model: 'gemini-4-hydrogen',
+      const { response } = await generateContentSmart(geminiApiKey, {
+        model: DEFAULT_FAST_MODEL,
         contents: `請查詢並確認飯店「${cleanQ}」的正確地址（優先提供 Google Maps 標準地址格式，若為日本飯店可同時附上英文/Chome地址與日文郵遞區號地址，例如 "2 Chome-2-18 Dotonbori, Chuo Ward, Osaka, 542-0071日本 (〒542-0071 大阪府大阪市中央区道頓堀2-2-18)"）。
 請注意：只回傳真正符合「${cleanQ}」該分館的正確地址，絕對不要回傳其他城市或無關的分館。
 即時網路檢索參考資訊：
@@ -247,7 +342,6 @@ ${webSnippet || '無額外網頁摘要，請根據你的知識庫提供該飯店
         config: {
           systemInstruction:
             '你是全球飯店與 Google Maps 地理資訊專家。請精準回傳使用者指定飯店分館的真實地址與概略經緯度座標。',
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -321,7 +415,8 @@ export async function handleGeminiRequest(
             : 'ai_studio'
           : 'none',
         googleMapsConfigured: Boolean(getServerGoogleMapsApiKey()),
-        model: 'gemini-4-hydrogen',
+        model: DEFAULT_FAST_MODEL,
+        supportedModels: [DEFAULT_FAST_MODEL, COMPLEX_REASONING_MODEL],
       },
     };
   }
@@ -364,6 +459,8 @@ export async function handleGeminiRequest(
     };
   }
 
+  const targetModel = resolveRequestedModel(payload.preferredModel, DEFAULT_FAST_MODEL);
+
   try {
     if (payload.action === 'optimize_itinerary') {
       const mode = payload.mode || 'fill_and_reorder';
@@ -381,8 +478,8 @@ export async function handleGeminiRequest(
 可用日期：${JSON.stringify(days)}
 目的地清單：${JSON.stringify(places)}`;
 
-      const response = await generateContentSmart(apiKey, {
-        model: 'gemini-4-hydrogen',
+      const { response, modelUsed, retriedCount } = await generateContentSmart(apiKey, {
+        model: targetModel,
         contents: prompt,
         config: {
           systemInstruction:
@@ -425,6 +522,8 @@ export async function handleGeminiRequest(
         status: 200,
         body: {
           ok: true,
+          modelUsed,
+          retriedCount,
           data: parsed,
         },
       };
@@ -455,8 +554,8 @@ export async function handleGeminiRequest(
         text: '請辨識這張旅遊收據、發票或菜單照片，提取店家名稱與所有消費品項（將品項名稱翻譯成清楚的繁體中文，附上單價或小計金額、數量，並將每個品項歸類為 shopping、dining、transport 或 gifts 四類之一）。若照片金額為外幣但非日圓，請照實填寫數字與幣別。',
       };
 
-      const response = await generateContentSmart(apiKey, {
-        model: 'gemini-4-hydrogen',
+      const { response, modelUsed, retriedCount } = await generateContentSmart(apiKey, {
+        model: targetModel,
         contents: { parts: [imagePart, textPart] },
         config: {
           systemInstruction:
@@ -515,6 +614,8 @@ export async function handleGeminiRequest(
         status: 200,
         body: {
           ok: true,
+          modelUsed,
+          retriedCount,
           data: parsed,
         },
       };
@@ -533,8 +634,8 @@ export async function handleGeminiRequest(
         };
       }
 
-      const response = await generateContentSmart(apiKey, {
-        model: 'gemini-4-hydrogen',
+      const { response, modelUsed, retriedCount } = await generateContentSmart(apiKey, {
+        model: targetModel,
         contents: `使用者在旅遊時想對店員或當地人表達以下意思：「${query}」。請生成最自然有禮貌的日文句子、羅馬拼音、英文句子、繁體中文標題與一個代表 Emoji。`,
         config: {
           systemInstruction:
@@ -561,6 +662,8 @@ export async function handleGeminiRequest(
         status: 200,
         body: {
           ok: true,
+          modelUsed,
+          retriedCount,
           data: parsed,
         },
       };
@@ -619,7 +722,20 @@ export async function handleGeminiRequest(
           errorCode: 'QUOTA_EXCEEDED',
           rawError: rawMsg,
           message:
-            '今日免費 Gemini API 呼叫次數已達上限 (429)。離線功能仍可正常使用，或可於 Settings > Secrets 升級為付費 API Key 以提高限額。',
+            'Gemini API 呼叫次數暫時達限額 (429)，已自動重試 3 次仍達上限。離線功能仍可正常使用，或請稍候 1 分鐘再試。',
+        },
+      };
+    }
+
+    if (status === 503 || rawMsg.includes('UNAVAILABLE') || rawMsg.toLowerCase().includes('overloaded')) {
+      return {
+        status: 503,
+        body: {
+          error: true,
+          errorCode: 'MODEL_OVERLOADED',
+          rawError: rawMsg,
+          message:
+            'Gemini AI 伺服器目前高負載 (503)，系統已自動重試並嘗試切換模型仍暫時無法連線，請稍後再試（建議預設使用 gemini-3.5-flash-lite 較穩定快速）。',
         },
       };
     }
