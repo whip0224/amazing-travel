@@ -8,6 +8,7 @@ export const COMPLEX_REASONING_MODEL: GeminiModelId = 'gemini-3.8-flash';
 export interface GeminiRequestPayload {
   action:
     | 'status'
+    | 'test_connection'
     | 'optimize_itinerary'
     | 'scan_receipt'
     | 'smart_phrase'
@@ -54,6 +55,8 @@ function createGenAIClient(apiKey: string, vertexai = false): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     vertexai,
+    // 重要：@google/genai v3.1 預設為 v1，但 gemini-3.5-flash-lite / responseSchema 需要 v1beta
+    apiVersion: vertexai ? 'v1beta1' : 'v1beta',
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
@@ -64,6 +67,86 @@ function createGenAIClient(apiKey: string, vertexai = false): GoogleGenAI {
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseGeminiJson(rawText: string): any {
+  const cleaned = rawText
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  return JSON.parse(cleaned || '{}');
+}
+
+function normalizeContentsForRest(contents: any): any[] {
+  if (typeof contents === 'string') {
+    return [{ role: 'user', parts: [{ text: contents }] }];
+  }
+  if (Array.isArray(contents)) {
+    return contents;
+  }
+  if (contents && Array.isArray(contents.parts)) {
+    return [{ role: 'user', parts: contents.parts }];
+  }
+  return [{ role: 'user', parts: [{ text: String(contents || '') }] }];
+}
+
+async function callGeminiV1BetaRest(
+  apiKey: string,
+  model: GeminiModelId,
+  contents: any,
+  config?: any
+): Promise<{ text: string }> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    model
+  )}:generateContent`;
+
+  const bodyPayload: Record<string, any> = {
+    contents: normalizeContentsForRest(contents),
+  };
+
+  if (config?.systemInstruction) {
+    bodyPayload.systemInstruction = {
+      parts: [{ text: String(config.systemInstruction) }],
+    };
+  }
+
+  if (config?.responseMimeType || config?.responseSchema) {
+    bodyPayload.generationConfig = {};
+    if (config.responseMimeType) {
+      bodyPayload.generationConfig.responseMimeType = config.responseMimeType;
+    }
+    if (config.responseSchema) {
+      bodyPayload.generationConfig.responseSchema = config.responseSchema;
+    }
+  }
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+      'User-Agent': 'aistudio-build',
+    },
+    body: JSON.stringify(bodyPayload),
+  });
+
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err: any = new Error(JSON.stringify(data));
+    err.status = res.status;
+    throw err;
+  }
+
+  const parts = Array.isArray(data?.candidates?.[0]?.content?.parts)
+    ? data.candidates[0].content.parts
+    : [];
+  const nonThoughtText = parts
+    .filter((p: any) => !p?.thought && typeof p?.text === 'string')
+    .map((p: any) => p.text)
+    .join('');
+  const text = nonThoughtText || parts.find((p: any) => typeof p?.text === 'string')?.text || '';
+  return { text };
 }
 
 function isRetryableStatusError(err: any): boolean {
@@ -135,8 +218,21 @@ async function generateContentSmart(
           continue;
         }
 
-        // 若為 AQ. 金鑰且在標準端點遇到 401/403，嘗試一次 Vertex Express 端點
-        const errStatus = Number(err?.status) || 0;
+        // 若 SDK 呼叫發生 400/404 或其他端點相容問題，直接使用官方 v1beta REST fetch 保底
+        try {
+          const restRes = await callGeminiV1BetaRest(
+            apiKey,
+            targetModel,
+            params.contents,
+            baseConfig
+          );
+          return { response: restRes, modelUsed: targetModel, retriedCount };
+        } catch (restErr: any) {
+          lastError = restErr;
+        }
+
+        // 若為 AQ. 金鑰且在 Google AI Studio 端點遇到 401/403，嘗試一次 Vertex Express 端點（但不覆寫原始 AI Studio 錯誤）
+        const errStatus = Number(lastError?.status) || 0;
         if (isAQ && (errStatus === 401 || errStatus === 403)) {
           try {
             const vertexClient = createGenAIClient(apiKey, true);
@@ -146,13 +242,13 @@ async function generateContentSmart(
               config: baseConfig,
             });
             return { response, modelUsed: targetModel, retriedCount };
-          } catch (vErr: any) {
-            lastError = vErr;
+          } catch {
+            // 保留原始 generativelanguage.googleapis.com 錯誤訊息
           }
         }
 
         // 針對 429 (頻率/配額限制) 與 503 (伺服器暫時忙碌) 執行自動指數退避重試
-        if (isRetryableStatusError(err) && attempt < maxAttemptsPerModel) {
+        if (isRetryableStatusError(lastError) && attempt < maxAttemptsPerModel) {
           retriedCount += 1;
           const jitter = Math.floor(Math.random() * 250);
           const backoffMs = attempt === 1 ? 800 + jitter : 1800 + jitter;
@@ -367,7 +463,7 @@ ${webSnippet || '無額外網頁摘要，請根據你的知識庫提供該飯店
       });
 
       const rawText = (response.text ?? '{}').trim();
-      const parsed = JSON.parse(rawText);
+      const parsed = parseGeminiJson(rawText);
       if (Array.isArray(parsed?.candidates)) {
         for (const c of parsed.candidates) {
           const addr = (c?.address || '').trim();
@@ -462,6 +558,26 @@ export async function handleGeminiRequest(
   const targetModel = resolveRequestedModel(payload.preferredModel, DEFAULT_FAST_MODEL);
 
   try {
+    if (payload.action === 'test_connection') {
+      const { response, modelUsed, retriedCount } = await generateContentSmart(apiKey, {
+        model: targetModel,
+        contents: '請回覆：連線成功',
+      });
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          modelUsed,
+          retriedCount,
+          data: {
+            reply: (response.text ?? '').trim() || '連線成功',
+            modelUsed,
+            retriedCount,
+          },
+        },
+      };
+    }
+
     if (payload.action === 'optimize_itinerary') {
       const mode = payload.mode || 'fill_and_reorder';
       const days = Array.isArray(payload.days) ? payload.days : [];
@@ -517,7 +633,7 @@ export async function handleGeminiRequest(
       });
 
       const rawText = (response.text ?? '{}').trim();
-      const parsed = JSON.parse(rawText);
+      const parsed = parseGeminiJson(rawText);
       return {
         status: 200,
         body: {
@@ -609,7 +725,7 @@ export async function handleGeminiRequest(
       });
 
       const rawText = (response.text ?? '{}').trim();
-      const parsed = JSON.parse(rawText);
+      const parsed = parseGeminiJson(rawText);
       return {
         status: 200,
         body: {
@@ -657,7 +773,7 @@ export async function handleGeminiRequest(
       });
 
       const rawText = (response.text ?? '{}').trim();
-      const parsed = JSON.parse(rawText);
+      const parsed = parseGeminiJson(rawText);
       return {
         status: 200,
         body: {

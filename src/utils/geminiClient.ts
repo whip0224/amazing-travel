@@ -303,3 +303,18 @@ export async function optimizeItineraryViaServer(
     mode,
   });
 }
+
+export async function testGeminiConnection(
+  preferredModel?: GeminiModelOption
+): Promise<
+  GeminiClientResponse<{
+    reply: string;
+    modelUsed: string;
+    retriedCount: number;
+  }>
+> {
+  return callGeminiEndpoint({
+    action: 'test_connection',
+    preferredModel: preferredModel || getPreferredGeminiModel(),
+  });
+}

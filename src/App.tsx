@@ -93,6 +93,7 @@ import {
   checkGeminiStatus,
   scanReceiptWithGemini,
   generateSmartPhraseWithGemini,
+  testGeminiConnection,
   getPreferredGeminiModel,
   setPreferredGeminiModel,
   DEFAULT_GEMINI_MODEL,
@@ -552,6 +553,11 @@ export default function App() {
     setPreferredGeminiModelState(model);
   };
   const [missingApiKeyModalMsg, setMissingApiKeyModalMsg] = useState<string | null>(null);
+  const [isTestingGemini, setIsTestingGemini] = useState<boolean>(false);
+  const [geminiTestFeedback, setGeminiTestFeedback] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
   const [isScanningReceipt, setIsScanningReceipt] = useState<boolean>(false);
   const [scannedReceiptData, setScannedReceiptData] = useState<ScannedReceiptResult | null>(null);
   const [scannedReceiptPreviewUrl, setScannedReceiptPreviewUrl] = useState<string | null>(null);
@@ -571,6 +577,35 @@ export default function App() {
       setGeminiConfigured(status.configured);
     });
   }, []);
+
+  const handleTestGeminiConnection = async () => {
+    if (isTestingGemini) return;
+    setIsTestingGemini(true);
+    setGeminiTestFeedback(null);
+    try {
+      const status = await checkGeminiStatus();
+      setGeminiConfigured(status.configured);
+      const res = await testGeminiConnection(preferredGeminiModel);
+      if (res.ok && res.data) {
+        setGeminiConfigured(true);
+        const retryNote =
+          typeof res.retriedCount === 'number' && res.retriedCount > 0
+            ? `（自動重試 ${res.retriedCount} 次後成功）`
+            : '';
+        setGeminiTestFeedback({
+          ok: true,
+          text: `連線成功！使用模型 ${res.modelUsed || res.data.modelUsed}${retryNote}，AI 回覆：「${res.data.reply}」`,
+        });
+      } else {
+        setGeminiTestFeedback({
+          ok: false,
+          text: res.errorMessage || '測試連線失敗，請檢查伺服器環境變數設定。',
+        });
+      }
+    } finally {
+      setIsTestingGemini(false);
+    }
+  };
 
   const handleScanReceiptFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2553,13 +2588,17 @@ export default function App() {
         )}
         <button
           type="button"
-          onClick={() =>
+          onClick={() => {
+            setGeminiTestFeedback(null);
+            checkGeminiStatus().then((status) => {
+              setGeminiConfigured(status.configured);
+            });
             setMissingApiKeyModalMsg(
               geminiConfigured
-                ? '✅ 目前伺服器已成功載入 GEMINI_API_KEY！所有 Gemini AI 功能（拍收據自動記帳、AI 智慧行程優化、AI 即時生成溝通字卡）皆已啟用。'
+                ? '✅ 目前伺服器已偵測到 GEMINI_API_KEY。可點擊下方「⚡ 一鍵測試 AI 連線」實測目前模型是否暢通。'
                 : '尚未偵測到伺服器的 GEMINI_API_KEY 環境變數。為保護您的金鑰不被前端網頁外洩，API Key 不會在手機畫面上直接輸入，而是設定於後端環境變數中（請見下方設定步驟）。'
-            )
-          }
+            );
+          }}
           title="查看 Gemini API Key 設定位置與 AI 狀態"
           className={`px-2.5 py-1 rounded-full text-[10.5px] font-extrabold flex items-center gap-1 shadow-2xs transition ${
             geminiConfigured
@@ -6817,6 +6856,35 @@ export default function App() {
 
             <div className="p-3 rounded-2xl bg-[#FFF8F1] border border-[#F5D0A9] text-xs font-bold text-[#7C2D12] leading-relaxed">
               {missingApiKeyModalMsg}
+            </div>
+
+            {/* 實測後端 /api/gemini 連線按鈕 */}
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={handleTestGeminiConnection}
+                disabled={isTestingGemini}
+                className="w-full py-2.5 px-3 rounded-xl bg-[#0F766E] hover:bg-[#0D625B] disabled:opacity-60 text-white font-extrabold text-xs flex items-center justify-center gap-1.5 shadow-xs transition"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>
+                  {isTestingGemini
+                    ? `正在實測 ${preferredGeminiModel} 連線中...`
+                    : `⚡ 一鍵測試 AI 連線 (${preferredGeminiModel})`}
+                </span>
+              </button>
+              {geminiTestFeedback && (
+                <div
+                  className={`p-2.5 rounded-xl border text-[11.5px] font-bold leading-snug ${
+                    geminiTestFeedback.ok
+                      ? 'bg-[#EAF7F0] border-[#A7E0C1] text-[#14532D]'
+                      : 'bg-[#FEF2F2] border-[#FECACA] text-[#991B1B]'
+                  }`}
+                >
+                  {geminiTestFeedback.ok ? '✅ ' : '❌ '}
+                  {geminiTestFeedback.text}
+                </div>
+              )}
             </div>
 
             {/* AI 模型偏好與 429/503 重試機制設定 */}
