@@ -101,6 +101,10 @@ import {
   type GeminiModelOption,
   type ScannedReceiptResult,
 } from './utils/geminiClient';
+import {
+  fetchWeatherForDates,
+  type DailyWeatherForecast,
+} from './utils/weatherService';
 
 // --- Firebase 初始化 (保留原有專案雲端連線架構) ---
 const firebaseConfig = {
@@ -1332,6 +1336,51 @@ export default function App() {
     () => getDynamicSeasonalBanner(state.trip.destinationTitle, state.trip.startDate),
     [state.trip.destinationTitle, state.trip.startDate]
   );
+
+  // 🌤️ 即時串接 Open-Meteo 天氣 API：自動根據「目的地」與「日期」取得預測天氣圖示與溫度
+  const [weatherByDate, setWeatherByDate] = useState<Record<string, DailyWeatherForecast>>({});
+  const [isLoadingWeather, setIsLoadingWeather] = useState<boolean>(false);
+
+  useEffect(() => {
+    const dest = (state.trip.destinationTitle || '').trim();
+    if (!dest) {
+      setWeatherByDate({});
+      return;
+    }
+
+    const targetDates = Array.from(
+      new Set([
+        state.trip.startDate,
+        state.trip.endDate,
+        ...tripDays.map((d) => d.iso),
+      ])
+    ).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
+
+    if (targetDates.length === 0) return;
+
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      setIsLoadingWeather(true);
+      try {
+        const data = await fetchWeatherForDates(dest, targetDates, controller.signal);
+        if (!controller.signal.aborted) {
+          setWeatherByDate(data);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoadingWeather(false);
+        }
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [state.trip.destinationTitle, state.trip.startDate, state.trip.endDate, tripDays]);
+
+  const startWeather = weatherByDate[state.trip.startDate];
+  const endWeather = weatherByDate[state.trip.endDate];
 
   const curatedGemData = useMemo(
     () => getCuratedGemsForDestination(state.trip.destinationTitle, state.destinations),
@@ -3297,9 +3346,30 @@ export default function App() {
                     {/* 下方目的地大標題與日期 + 右下角「✏️ 點擊圖片編輯旅程」 */}
                     <div className="relative z-10 text-white pointer-events-none flex items-end justify-between gap-2">
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 text-[13px] font-bold text-[#FCE5DC] drop-shadow-xs mb-0.5">
+                        <div className="flex items-center flex-wrap gap-1.5 text-[13px] font-bold text-[#FCE5DC] drop-shadow-xs mb-0.5">
                           <CalendarCheck className="w-4 h-4 text-[#FADBD0] shrink-0" />
                           <span className="truncate">{autoDateRangeLabel}</span>
+                          {(startWeather || isLoadingWeather) && (
+                            <span
+                              title={
+                                startWeather
+                                  ? `${startWeather.cityName} ${startWeather.date} ${startWeather.conditionText} (${startWeather.sourceLabel})`
+                                  : '正在取得天氣預報'
+                              }
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/45 text-white text-[11px] font-extrabold backdrop-blur-xs border border-white/20 shrink-0"
+                            >
+                              {startWeather ? (
+                                <>
+                                  <span>{startWeather.emoji}</span>
+                                  <span className="tabular-nums">
+                                    {startWeather.tempMin}°–{startWeather.tempMax}°C
+                                  </span>
+                                </>
+                              ) : (
+                                <span className="opacity-85">天氣查詢中...</span>
+                              )}
+                            </span>
+                          )}
                         </div>
                         <h1 className="text-[31px] font-extrabold tracking-tight leading-none drop-shadow-sm truncate">
                           {state.trip.destinationTitle}
@@ -3315,27 +3385,61 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* 季節氣候與旅遊小貼士底欄（會隨「目的地」與「出發月份」自動動態轉換，不再固定不變！點擊亦可自訂） */}
+                  {/* 天氣預報與季節氣候底欄（優先顯示 Open-Meteo API 實測/預報天氣，並保留季節小貼士；點擊亦可編輯旅程與日期） */}
                   <div
                     onClick={() => setShowTripModal(true)}
                     data-no-flip="true"
-                    title="根據目的地與出發月份自動轉換季節氣候提示（點擊可編輯旅程）"
-                    className="px-4 py-3 bg-white hover:bg-[#F8FCFA] flex items-center justify-between gap-2 cursor-pointer transition"
+                    title="根據目的地與日期自動查詢天氣預報與氣候（點擊可編輯旅程）"
+                    className="px-4 py-3 bg-white hover:bg-[#F8FCFA] space-y-2 cursor-pointer transition"
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="text-2xl shrink-0">{seasonalBanner.emoji}</span>
-                      <div className="min-w-0">
-                        <div className="text-[13px] font-extrabold text-[#182B23] truncate">
-                          {seasonalBanner.weatherTitle}
-                        </div>
-                        <div className="text-[11.5px] text-[#5B7368] truncate">
-                          {seasonalBanner.weatherSub}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="text-2xl shrink-0">
+                          {startWeather ? startWeather.emoji : seasonalBanner.emoji}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="text-[13px] font-extrabold text-[#182B23] truncate">
+                            {startWeather
+                              ? `${startWeather.cityName} ${startWeather.conditionText} · ${startWeather.tempMin}°–${startWeather.tempMax}°C${
+                                  typeof startWeather.precipProb === 'number'
+                                    ? ` · 降雨 ${startWeather.precipProb}%`
+                                    : ''
+                                }`
+                              : seasonalBanner.weatherTitle}
+                          </div>
+                          <div className="text-[11.5px] text-[#5B7368] truncate">
+                            {startWeather
+                              ? `${seasonalBanner.weatherTitle}（${seasonalBanner.weatherSub}）`
+                              : seasonalBanner.weatherSub}
+                          </div>
                         </div>
                       </div>
+                      <span className="px-3 py-1 rounded-full bg-[#FCE3DA] text-[#B83E1B] text-[11px] font-extrabold shrink-0">
+                        {startWeather ? startWeather.sourceLabel : seasonalBanner.weatherBadge}
+                      </span>
                     </div>
-                    <span className="px-3 py-1 rounded-full bg-[#FCE3DA] text-[#B83E1B] text-[11px] font-extrabold shrink-0">
-                      {seasonalBanner.weatherBadge}
-                    </span>
+
+                    {/* 旅程每日天氣膠囊列 */}
+                    {tripDays.some((d) => weatherByDate[d.iso]) && (
+                      <div className="flex items-center gap-1.5 overflow-x-auto day-strip-scroll pt-1 border-t border-[#EDF5F0]">
+                        {tripDays.map((d) => {
+                          const w = weatherByDate[d.iso];
+                          if (!w) return null;
+                          return (
+                            <span
+                              key={d.iso}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#F2F8F5] border border-[#DCEAE2] text-[10.5px] font-bold text-[#254437] shrink-0 tabular-nums"
+                            >
+                              <span className="text-[#5B7368]">{d.iso.slice(5).replace('-', '/')}</span>
+                              <span>{w.emoji}</span>
+                              <span>
+                                {w.tempMin}°/{w.tempMax}°
+                              </span>
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -3701,14 +3805,25 @@ export default function App() {
                       type="button"
                       onClick={() => setShowTripModal(true)}
                       data-no-flip="true"
-                      className="flex items-center gap-1.5 text-[12px] text-[#5C473E] font-bold mt-1.5 hover:underline"
+                      className="flex items-center flex-wrap gap-1.5 text-[12px] text-[#5C473E] font-bold mt-1.5 hover:underline text-left"
                     >
-                      <MapPin className="w-3.5 h-3.5 text-[#C24726]" />
+                      <MapPin className="w-3.5 h-3.5 text-[#C24726] shrink-0" />
                       <span>{state.trip.destinationTitle}</span>
                       <span className="text-[#D4A999]">•</span>
                       <span>
                         {state.trip.startDate} ~ {state.trip.endDate} ✏️
                       </span>
+                      {weatherByDate[tripDays[selectedDay]?.iso || state.trip.startDate] && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#E3F1EC] text-[#165C3E] text-[11px] font-extrabold">
+                          <span>
+                            {weatherByDate[tripDays[selectedDay]?.iso || state.trip.startDate].emoji}
+                          </span>
+                          <span className="tabular-nums">
+                            {weatherByDate[tripDays[selectedDay]?.iso || state.trip.startDate].tempMin}°–
+                            {weatherByDate[tripDays[selectedDay]?.iso || state.trip.startDate].tempMax}°C
+                          </span>
+                        </span>
+                      )}
                     </button>
                   </div>
 
@@ -3877,11 +3992,19 @@ export default function App() {
                             ) : null}
                           </div>
                           <div
-                            className={`text-[11.5px] font-bold mt-0.5 whitespace-nowrap ${
+                            className={`text-[11.5px] font-bold mt-0.5 whitespace-nowrap flex items-center gap-1.5 ${
                               isSelected ? 'text-[#B8411D]' : 'text-[#5A7066]'
                             }`}
                           >
-                            {d.dateDisp}
+                            <span>{d.dateDisp}</span>
+                            {weatherByDate[d.iso] && (
+                              <span className="inline-flex items-center gap-0.5 text-[10.5px] font-extrabold text-[#1A5D42] tabular-nums">
+                                <span>{weatherByDate[d.iso].emoji}</span>
+                                <span>
+                                  {weatherByDate[d.iso].tempMin}°/{weatherByDate[d.iso].tempMax}°
+                                </span>
+                              </span>
+                            )}
                           </div>
                         </button>
                       );
@@ -6129,12 +6252,26 @@ export default function App() {
               />
             </div>
 
-            {/* 出發日期與回程日期改為垂直滿版排列，徹底解決 iPhone Safari 日期選擇器超出視窗右緣問題 */}
+            {/* 出發日期與回程日期旁即時顯示該日與目的地的預測天氣圖示與溫度 */}
             <div className="grid grid-cols-1 gap-2.5">
               <div className="min-w-0">
-                <label className="text-xs font-bold text-[#4A6357] block mb-1">
-                  出發日期 (Start Date)
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="text-xs font-bold text-[#4A6357]">
+                    出發日期 (Start Date)
+                  </label>
+                  {startWeather ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#EAF7F0] border border-[#BDE5CE] text-[#14532D] text-[10.5px] font-extrabold shrink-0">
+                      <span>{startWeather.emoji}</span>
+                      <span>{startWeather.conditionText}</span>
+                      <span className="tabular-nums">
+                        {startWeather.tempMin}°~{startWeather.tempMax}°C
+                      </span>
+                      <span className="text-[9.5px] opacity-75">({startWeather.sourceLabel})</span>
+                    </span>
+                  ) : isLoadingWeather ? (
+                    <span className="text-[10.5px] font-bold text-[#5B7368]">🌤️ 查詢天氣中...</span>
+                  ) : null}
+                </div>
                 <input
                   type="date"
                   value={state.trip.startDate}
@@ -6158,9 +6295,23 @@ export default function App() {
                 />
               </div>
               <div className="min-w-0">
-                <label className="text-xs font-bold text-[#4A6357] block mb-1">
-                  回程日期 (End Date)
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="text-xs font-bold text-[#4A6357]">
+                    回程日期 (End Date)
+                  </label>
+                  {endWeather ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#EAF7F0] border border-[#BDE5CE] text-[#14532D] text-[10.5px] font-extrabold shrink-0">
+                      <span>{endWeather.emoji}</span>
+                      <span>{endWeather.conditionText}</span>
+                      <span className="tabular-nums">
+                        {endWeather.tempMin}°~{endWeather.tempMax}°C
+                      </span>
+                      <span className="text-[9.5px] opacity-75">({endWeather.sourceLabel})</span>
+                    </span>
+                  ) : isLoadingWeather ? (
+                    <span className="text-[10.5px] font-bold text-[#5B7368]">🌤️ 查詢天氣中...</span>
+                  ) : null}
+                </div>
                 <input
                   type="date"
                   value={state.trip.endDate}
