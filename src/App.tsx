@@ -707,7 +707,8 @@ export default function App() {
   const handleConfirmScannedReceipt = () => {
     if (!scannedReceiptData || !Array.isArray(scannedReceiptData.items)) return;
     const nowStr = new Date().toISOString().slice(0, 16).replace('T', ' ');
-    const cur = (scannedReceiptData.currency || 'JPY').toUpperCase();
+    const rawCur = (scannedReceiptData.currency || 'JPY').toUpperCase();
+    const cur = rawCur === 'RMB' ? 'CNY' : rawCur;
     const addedExpenses: ExpenseItem[] = scannedReceiptData.items.map((it, idx) => {
       const qty = Math.max(1, Number(it.quantity) || 1);
       const origAmt = Math.max(0, Number(it.amount) || 0);
@@ -4980,16 +4981,13 @@ export default function App() {
                       onChange={(e) =>
                         setState((prev) => ({ ...prev, currencyB: e.target.value }))
                       }
-                      className="px-2.5 py-1.5 rounded-xl bg-[#FDF5F2] text-[#9E3516] text-[11.5px] font-extrabold cursor-pointer border border-[#F5DDD4] focus:outline-none"
+                      className="px-2.5 py-1.5 rounded-xl bg-[#FDF5F2] text-[#9E3516] text-[11.5px] font-extrabold cursor-pointer border border-[#F5DDD4] focus:outline-none max-w-[148px] shrink-0"
                     >
-                      <option value="USD">TWD / HKD ⌄</option>
-                      <option value="TWD">🇹🇼 切換 TWD 新台幣</option>
-                      <option value="HKD">🇭🇰 切換 HKD 港幣</option>
-                      <option value="USD">🇺🇸 切換 USD 美金</option>
-                      <option value="KRW">🇰🇷 切換 KRW 韓元</option>
-                      <option value="THB">🇹🇭 切換 THB 泰銖</option>
-                      <option value="SGD">🇸🇬 切換 SGD 新幣</option>
-                      <option value="EUR">🇪🇺 切換 EUR 歐元</option>
+                      {CURRENCIES.map((c) => (
+                        <option key={c.code} value={c.code}>
+                          {c.flag} 切換 {c.code} {c.name.split(' ')[0]}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
@@ -4997,33 +4995,33 @@ export default function App() {
                   <div className="relative space-y-2.5">
                     {/* 貨幣 A · 支出支付 (You pay) */}
                     <div className="rounded-2xl bg-[#E8F3EE] p-3.5">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[12px] font-bold text-[#4F3B32]">
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <span className="text-[12px] font-bold text-[#4F3B32] truncate">
                           貨幣A · 支出支付 (You pay)
                         </span>
-                        <div className="relative">
+                        <div className="relative shrink-0">
                           <select
                             aria-label="Select Currency A"
                             value={state.currencyA}
                             onChange={(e) =>
                               setState((prev) => ({ ...prev, currencyA: e.target.value }))
                             }
-                            className="appearance-none bg-white pl-3 pr-7 py-1 rounded-full text-[13px] font-extrabold text-[#162921] shadow-2xs border border-[#DCE9E2] cursor-pointer focus:outline-none"
+                            className="appearance-none bg-white pl-2.5 pr-6 py-1 rounded-full text-[12.5px] font-extrabold text-[#162921] shadow-2xs border border-[#DCE9E2] cursor-pointer focus:outline-none"
                           >
                             {CURRENCIES.map((c) => (
                               <option key={c.code} value={c.code}>
-                                {c.flag} {c.code}
+                                {c.flag} {c.code} {c.name.split(' ')[0]}
                               </option>
                             ))}
                           </select>
-                          <span className="pointer-events-none absolute right-2.5 top-1.5 text-[11px] text-[#4E665B]">
+                          <span className="pointer-events-none absolute right-2 top-1.5 text-[11px] text-[#4E665B]">
                             ▾
                           </span>
                         </div>
                       </div>
 
                       <div className="flex items-baseline justify-between gap-2 pt-1">
-                        <span className="text-[20px] font-extrabold text-[#B53D1B]">
+                        <span className="text-[20px] font-extrabold text-[#B53D1B] shrink-0">
                           {curAObj.symbol}
                         </span>
                         <input
@@ -5053,33 +5051,33 @@ export default function App() {
 
                     {/* 貨幣 B · 折合 (Equivalent) */}
                     <div className="rounded-2xl bg-[#E8F3EE] p-3.5">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[12px] font-bold text-[#4F3B32]">
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <span className="text-[12px] font-bold text-[#4F3B32] truncate">
                           貨幣B · 折合 (Equivalent)
                         </span>
-                        <div className="relative">
+                        <div className="relative shrink-0">
                           <select
                             aria-label="Select Currency B"
                             value={state.currencyB}
                             onChange={(e) =>
                               setState((prev) => ({ ...prev, currencyB: e.target.value }))
                             }
-                            className="appearance-none bg-white pl-3 pr-7 py-1 rounded-full text-[13px] font-extrabold text-[#162921] shadow-2xs border border-[#DCE9E2] cursor-pointer focus:outline-none"
+                            className="appearance-none bg-white pl-2.5 pr-6 py-1 rounded-full text-[12.5px] font-extrabold text-[#162921] shadow-2xs border border-[#DCE9E2] cursor-pointer focus:outline-none"
                           >
                             {CURRENCIES.map((c) => (
                               <option key={c.code} value={c.code}>
-                                {c.flag} {c.code}
+                                {c.flag} {c.code} {c.name.split(' ')[0]}
                               </option>
                             ))}
                           </select>
-                          <span className="pointer-events-none absolute right-2.5 top-1.5 text-[11px] text-[#4E665B]">
+                          <span className="pointer-events-none absolute right-2 top-1.5 text-[11px] text-[#4E665B]">
                             ▾
                           </span>
                         </div>
                       </div>
 
                       <div className="flex items-baseline justify-between gap-2 pt-1">
-                        <span className="text-[20px] font-extrabold text-[#1D6B4B]">
+                        <span className="text-[20px] font-extrabold text-[#1D6B4B] shrink-0">
                           {curBObj.symbol}
                         </span>
                         <div className="text-[32px] font-black tracking-tight text-[#14241D] tabular-nums">
@@ -5089,9 +5087,14 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* 快捷金額累加列 (+¥1,000 / +¥5,000 / +¥10,000 / Clear) */}
+                  {/* 快捷金額累加列 (依幣別自動調整面額 + Clear) */}
                   <div className="flex items-center justify-between gap-1.5 pt-1">
-                    {[1000, 5000, 10000].map((inc) => (
+                    {(state.currencyA === 'JPY' || state.currencyA === 'KRW'
+                      ? [1000, 5000, 10000]
+                      : state.currencyA === 'TWD' || state.currencyA === 'THB'
+                      ? [100, 500, 1000]
+                      : [50, 100, 500]
+                    ).map((inc) => (
                       <button
                         key={inc}
                         type="button"
@@ -6266,7 +6269,7 @@ export default function App() {
                 >
                   {CURRENCIES.map((c) => (
                     <option key={c.code} value={c.code}>
-                      {c.flag} {c.code} ({c.symbol})
+                      {c.flag} {c.code} · {c.name.split(' ')[0]} ({c.symbol})
                     </option>
                   ))}
                 </select>
@@ -6433,7 +6436,7 @@ export default function App() {
                   >
                     {CURRENCIES.map((c) => (
                       <option key={c.code} value={c.code}>
-                        {c.flag} {c.code} ({c.symbol})
+                        {c.flag} {c.code} · {c.name.split(' ')[0]} ({c.symbol})
                       </option>
                     ))}
                   </select>
@@ -6442,7 +6445,10 @@ export default function App() {
 
               {/* 價錢快速加減按鈕 */}
               <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
-                {[-500, -100, +100, +500, +1000].map((diff) => (
+                {(editExpForm.currency === 'JPY' || editExpForm.currency === 'KRW'
+                  ? [-500, -100, +100, +500, +1000]
+                  : [-100, -10, +10, +50, +100]
+                ).map((diff) => (
                   <button
                     key={diff}
                     type="button"

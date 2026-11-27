@@ -671,7 +671,7 @@ export async function handleGeminiRequest(
         },
       };
       const textPart = {
-        text: '請辨識這張旅遊收據、發票或菜單照片，提取店家名稱與所有消費品項（將品項名稱翻譯成清楚的繁體中文，附上單價或小計金額、數量，並將每個品項歸類為 shopping、dining、transport 或 gifts 四類之一）。若照片金額為外幣但非日圓，請照實填寫數字與幣別。',
+        text: '請辨識這張旅遊收據、發票或菜單照片，提取店家名稱與所有消費品項（將品項名稱翻譯成清楚的繁體中文，附上單價或小計金額、數量，並將每個品項歸類為 shopping、dining、transport 或 gifts 四類之一）。若照片為中國大陸/珠海消費或人民幣收據，請將幣別填為 CNY；其他外幣請照實填寫幣別代碼（如 HKD、TWD、JPY、KRW、THB、USD）。',
       };
 
       const { response, modelUsed, retriedCount } = await generateContentSmart(apiKey, {
@@ -679,7 +679,7 @@ export async function handleGeminiRequest(
         contents: { parts: [imagePart, textPart] },
         config: {
           systemInstruction:
-            '你是專精日本與亞洲旅遊收據、菜單辨識的 AI 記帳助手。請將日文/英文品項翻譯為繁體中文，並輸出符合 Schema 的 JSON。',
+            '你是專精日本、中國大陸及亞洲旅遊收據、菜單辨識的 AI 記帳助手。請將品項翻譯或整理為繁體中文，並輸出符合 Schema 的 JSON。',
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
           responseSchema: {
@@ -691,7 +691,7 @@ export async function handleGeminiRequest(
               },
               currency: {
                 type: Type.STRING,
-                description: '幣別代碼，預設 JPY（或 TWD, HKD, KRW, THB, USD）',
+                description: '幣別代碼，預設 JPY（或 CNY, HKD, TWD, KRW, THB, USD；中國大陸/人民幣收據請回傳 CNY）',
               },
               summaryNote: {
                 type: Type.STRING,

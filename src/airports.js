@@ -75,16 +75,16 @@ export const AIRPORTS_BY_COUNTRY = [
 
 export const CURRENCIES = [
   { code: "JPY", symbol: "¥", flag: "🇯🇵", name: "日圓 (Japanese Yen)", rateFromUSD: 155.40 },
-  { code: "USD", symbol: "$", flag: "🇺🇸", name: "美金 (US Dollar)", rateFromUSD: 1.00 },
-  { code: "TWD", symbol: "NT$", flag: "🇹🇼", name: "新台幣 (New Taiwan Dollar)", rateFromUSD: 32.15 },
+  { code: "CNY", symbol: "CN¥", flag: "🇨🇳", name: "人民幣 (RMB / Chinese Yuan)", rateFromUSD: 7.24 },
   { code: "HKD", symbol: "HK$", flag: "🇭🇰", name: "港幣 (Hong Kong Dollar)", rateFromUSD: 7.78 },
+  { code: "TWD", symbol: "NT$", flag: "🇹🇼", name: "新台幣 (New Taiwan Dollar)", rateFromUSD: 32.15 },
+  { code: "USD", symbol: "$", flag: "🇺🇸", name: "美金 (US Dollar)", rateFromUSD: 1.00 },
   { code: "KRW", symbol: "₩", flag: "🇰🇷", name: "韓元 (South Korean Won)", rateFromUSD: 1385.00 },
   { code: "THB", symbol: "฿", flag: "🇹🇭", name: "泰銖 (Thai Baht)", rateFromUSD: 34.80 },
   { code: "SGD", symbol: "S$", flag: "🇸🇬", name: "新幣 (Singapore Dollar)", rateFromUSD: 1.34 },
   { code: "EUR", symbol: "€", flag: "🇪🇺", name: "歐元 (Euro)", rateFromUSD: 0.93 },
   { code: "GBP", symbol: "£", flag: "🇬🇧", name: "英鎊 (British Pound)", rateFromUSD: 0.79 },
-  { code: "AUD", symbol: "A$", flag: "🇦🇺", name: "澳幣 (Australian Dollar)", rateFromUSD: 1.52 },
-  { code: "CNY", symbol: "¥", flag: "🇨🇳", name: "人民幣 (Chinese Yuan)", rateFromUSD: 7.24 }
+  { code: "AUD", symbol: "A$", flag: "🇦🇺", name: "澳幣 (Australian Dollar)", rateFromUSD: 1.52 }
 ];
 
 // Backwards-compatible default export for existing code
