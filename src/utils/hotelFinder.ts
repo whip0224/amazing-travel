@@ -694,51 +694,7 @@ export async function searchHotelCandidates(
       });
     };
 
-    // 2A. 若瀏覽器已載入 Google Maps Places Service (VITE_GOOGLE_MAPS_API_KEY)，第一優先查詢 Google Maps 官方資料庫
-    try {
-      const g = (window as any).google;
-      if (g?.maps?.places?.PlacesService) {
-        const dummy = document.createElement('div');
-        const service = new g.maps.places.PlacesService(dummy);
-        const gResults = await new Promise<HotelCandidate[]>((resolve) => {
-          const timer = setTimeout(() => resolve([]), 2000);
-          service.textSearch({ query: q }, (places: any, status: any) => {
-            clearTimeout(timer);
-            if (status === g.maps.places.PlacesServiceStatus.OK && Array.isArray(places)) {
-              resolve(
-                places.slice(0, 5).map((p: any, i: number) => ({
-                  id: p.place_id || `gplace-${i}`,
-                  name: p.name || q,
-                  branchNote: p.rating ? `Google Maps ⭐ ${p.rating}` : 'Google Maps 官方地標',
-                  address: p.formatted_address || '',
-                  lat:
-                    typeof p.geometry?.location?.lat === 'function'
-                      ? p.geometry.location.lat()
-                      : undefined,
-                  lng:
-                    typeof p.geometry?.location?.lng === 'function'
-                      ? p.geometry.location.lng()
-                      : undefined,
-                }))
-              );
-            } else {
-              resolve([]);
-            }
-          });
-        });
-
-        gResults.forEach((gr) => {
-          if (gr.address && !seenAddresses.has(gr.address)) {
-            seenAddresses.add(gr.address);
-            results.push(gr);
-          }
-        });
-      }
-    } catch {
-      // ignore Google Maps JS SDK error and continue to server lookup
-    }
-
-    // 2B. 若尚未取得地址，呼叫後端真實飯店地址檢索 (/api/gemini action: 'hotel_address'，整合 Google Places REST + Gemini AI + Yahoo 檢索)
+    // 2A. 呼叫後端真實飯店地址檢索 (/api/gemini action: 'hotel_address'，整合伺服器端地點檢索與地址解析)
     if (results.length === 0) {
       try {
         const srvRes = await fetch('/api/gemini', {

@@ -1441,12 +1441,19 @@ export default function App() {
   // 🌤️ 即時串接 Open-Meteo 天氣 API：自動根據「目的地」與「日期」取得預測天氣圖示與溫度
   const [weatherByDate, setWeatherByDate] = useState<Record<string, DailyWeatherForecast>>({});
   const [isLoadingWeather, setIsLoadingWeather] = useState<boolean>(false);
+  const prevWeatherDestRef = useRef<string>('');
 
   useEffect(() => {
     const dest = (state.trip.destinationTitle || '').trim();
     if (!dest) {
+      prevWeatherDestRef.current = '';
       setWeatherByDate({});
       return;
+    }
+
+    if (prevWeatherDestRef.current !== dest) {
+      prevWeatherDestRef.current = dest;
+      setWeatherByDate({});
     }
 
     const targetDates = Array.from(
@@ -1788,6 +1795,32 @@ export default function App() {
     const meta = TRANSPORT_MODE_META[mode];
     setState((prev) => {
       const prevMode = getTripTransportMode(prev.outbound, prev.inbound);
+      const isDefaultOrPresetRoute =
+        prev.outbound.flightNo === 'NH 991' ||
+        prev.outbound.flightNo === 'Flight NH 991' ||
+        QUICK_LAND_ROUTES.some((p) => p.outbound.flightNo === prev.outbound.flightNo);
+
+      if (prevMode !== mode && mode !== 'flight' && isDefaultOrPresetRoute) {
+        const matchedPreset = QUICK_LAND_ROUTES.find((p) => p.mode === mode);
+        if (matchedPreset) {
+          const { outbound, inbound } = buildPresetLegsWithDates(
+            matchedPreset,
+            prev.trip.startDate,
+            prev.trip.endDate
+          );
+          return {
+            ...prev,
+            trip: {
+              ...prev.trip,
+              airlineLabel: matchedPreset.airlineLabel,
+              ...(matchedPreset.baggageLabel ? { baggageLabel: matchedPreset.baggageLabel } : {}),
+            },
+            outbound,
+            inbound,
+          };
+        }
+      }
+
       const shouldUpdateLabel =
         prevMode !== mode &&
         (!prev.trip.airlineLabel ||
@@ -1847,12 +1880,6 @@ export default function App() {
     const addedItems: SavedDestination[] = [];
 
     try {
-      const g = (window as any).google;
-      const hasPlacesService = Boolean(g?.maps?.places?.PlacesService);
-      const dummyDiv = hasPlacesService ? document.createElement('div') : null;
-      const service =
-        hasPlacesService && dummyDiv ? new g.maps.places.PlacesService(dummyDiv) : null;
-
       for (const name of names) {
         if (
           state.destinations.some(
@@ -1862,63 +1889,11 @@ export default function App() {
           continue;
         }
 
-        if (service) {
-          await new Promise<void>((resolve) => {
-            const timeout = setTimeout(() => {
-              addedItems.push({
-                id: `dest-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                name,
-                scheduled: null,
-              });
-              resolve();
-            }, 1800);
-
-            service.textSearch({ query: name }, (results: any, status: any) => {
-              clearTimeout(timeout);
-              if (
-                status === g.maps.places.PlacesServiceStatus.OK &&
-                Array.isArray(results) &&
-                results.length > 0
-              ) {
-                const p = results[0];
-                addedItems.push({
-                  id: p.place_id || `dest-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                  name: p.name || name,
-                  customName: name,
-                  formattedAddress: p.formatted_address,
-                  rating: p.rating,
-                  userRatingCount: p.user_ratings_total,
-                  location: p.geometry?.location
-                    ? {
-                        lat:
-                          typeof p.geometry.location.lat === 'function'
-                            ? p.geometry.location.lat()
-                            : p.geometry.location.lat,
-                        lng:
-                          typeof p.geometry.location.lng === 'function'
-                            ? p.geometry.location.lng()
-                            : p.geometry.location.lng,
-                      }
-                    : undefined,
-                  scheduled: null,
-                });
-              } else {
-                addedItems.push({
-                  id: `dest-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                  name,
-                  scheduled: null,
-                });
-              }
-              resolve();
-            });
-          });
-        } else {
-          addedItems.push({
-            id: `dest-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            name,
-            scheduled: null,
-          });
-        }
+        addedItems.push({
+          id: `dest-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          name,
+          scheduled: null,
+        });
       }
 
       if (addedItems.length > 0) {
@@ -3784,11 +3759,11 @@ export default function App() {
                           )}
                         </div>
 
-                        {/* 若目前為陸路/海陸模式，顯示一鍵套用珠海 / 港珠澳熱門路線快捷列 */}
+                        {/* 若目前為陸路/海陸模式，顯示一鍵套用珠海 / 港珠澳熱門路線快捷列（自動換行完整顯示所有選項） */}
                         {!isFlightTrip && (
                           <div
                             data-no-flip="true"
-                            className="flex items-center gap-1.5 overflow-x-auto pb-1 tabi-scroll"
+                            className="flex flex-wrap items-center gap-1.5"
                           >
                             <span className="text-[10.5px] font-extrabold text-[#547063] shrink-0">
                               ⚡ 快捷路線:
@@ -3798,19 +3773,19 @@ export default function App() {
                                 key={preset.id}
                                 type="button"
                                 onClick={() => handleApplyLandPreset(preset)}
-                                className={`px-2.5 py-1 rounded-lg text-[10.5px] font-extrabold border shrink-0 transition whitespace-nowrap ${
+                                className={`px-2 py-1 rounded-lg text-[10.5px] font-extrabold border transition whitespace-nowrap ${
                                   preset.mode === tripMode
                                     ? 'bg-[#E2F3EA] border-[#9AD8BA] text-[#144B34]'
                                     : 'bg-[#F8FBF9] border-[#DCEAE2] text-[#476357] hover:bg-[#EAF4EF]'
                                 }`}
                               >
-                                {preset.title.split('⇄')[0].trim()}
+                                {preset.title.split('⇄')[0].split('（')[0].trim()}
                               </button>
                             ))}
                             <button
                               type="button"
                               onClick={() => openAirportPicker('outbound', 'depart')}
-                              className="px-2.5 py-1 rounded-lg text-[10.5px] font-extrabold bg-[#FCE1D6] text-[#9E3516] shrink-0"
+                              className="px-2 py-1 rounded-lg text-[10.5px] font-extrabold bg-[#FCE1D6] text-[#9E3516] whitespace-nowrap"
                             >
                               ✏️ 自訂站點
                             </button>
@@ -3833,18 +3808,18 @@ export default function App() {
                             </button>
                           </div>
 
-                          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1.5 sm:gap-2">
                             {/* 去程出發時間與站點 */}
                             <div className="min-w-0" data-no-flip="true">
-                              <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
+                              <div className="text-[26px] sm:text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
                                 {state.outbound.departTime}
                               </div>
                               <button
                                 type="button"
                                 onClick={() => openAirportPicker('outbound', 'depart')}
-                                className="mt-0.5 inline-flex items-center gap-1 text-[15px] font-extrabold text-[#B8431F] hover:bg-[#FCE1D6]/50 px-1.5 py-0.5 -ml-1.5 rounded-lg transition max-w-full"
+                                className="mt-0.5 inline-flex flex-wrap items-center gap-1 text-left text-[14px] sm:text-[15px] font-extrabold text-[#B8431F] hover:bg-[#FCE1D6]/50 px-1.5 py-0.5 -ml-1.5 rounded-lg transition max-w-full"
                               >
-                                <span className="truncate">{state.outbound.departCode}</span>
+                                <span className="leading-tight break-keep">{state.outbound.departCode}</span>
                                 {state.outbound.departTerminal && (
                                   <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#FCE1D6] text-[#9E3516] font-extrabold shrink-0">
                                     {state.outbound.departTerminal}
@@ -3858,33 +3833,33 @@ export default function App() {
                             </div>
 
                             {/* 行程線 */}
-                            <div className="flex flex-col items-center px-1.5">
-                              <span className="text-[11px] font-bold text-[#5E4037] mb-1 text-center">
+                            <div className="flex flex-col items-center px-1">
+                              <span className="text-[10.5px] sm:text-[11px] font-bold text-[#5E4037] mb-1 text-center max-w-[96px] sm:max-w-[130px] leading-tight">
                                 {state.outbound.duration}
                               </span>
-                              <div className="w-24 sm:w-28 flex items-center">
+                              <div className="w-16 sm:w-24 flex items-center">
                                 <div className="h-[2px] flex-1 bg-[#74C6A3]" />
                                 <span className="mx-1 text-[#1E6F4E] text-xs font-bold">
                                   {outboundModeMeta.routeSymbol}
                                 </span>
                                 <div className="h-[2px] flex-1 bg-[#74C6A3]" />
                               </div>
-                              <span className="text-[11px] font-bold text-[#22694B] mt-1 text-center line-clamp-1 max-w-[125px]">
+                              <span className="text-[10.5px] sm:text-[11px] font-bold text-[#22694B] mt-1 text-center line-clamp-1 max-w-[96px] sm:max-w-[130px]">
                                 {state.outbound.perkLabel}
                               </span>
                             </div>
 
                             {/* 去程抵達時間與站點 */}
                             <div className="text-right min-w-0" data-no-flip="true">
-                              <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
+                              <div className="text-[26px] sm:text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
                                 {state.outbound.arriveTime}
                               </div>
                               <button
                                 type="button"
                                 onClick={() => openAirportPicker('outbound', 'arrive')}
-                                className="mt-0.5 inline-flex items-center justify-end gap-1 text-[15px] font-extrabold text-[#B8431F] hover:bg-[#FCE1D6]/50 px-1.5 py-0.5 -mr-1.5 rounded-lg transition max-w-full"
+                                className="mt-0.5 inline-flex flex-wrap items-center justify-end gap-1 text-right text-[14px] sm:text-[15px] font-extrabold text-[#B8431F] hover:bg-[#FCE1D6]/50 px-1.5 py-0.5 -mr-1.5 rounded-lg transition max-w-full"
                               >
-                                <span className="truncate">{state.outbound.arriveCode}</span>
+                                <span className="leading-tight break-keep">{state.outbound.arriveCode}</span>
                                 {state.outbound.arriveTerminal && (
                                   <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#FCE1D6] text-[#9E3516] font-extrabold shrink-0">
                                     {state.outbound.arriveTerminal}
@@ -3917,18 +3892,18 @@ export default function App() {
                             </button>
                           </div>
 
-                          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1.5 sm:gap-2">
                             {/* 回程出發時間與站點 */}
                             <div className="min-w-0" data-no-flip="true">
-                              <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
+                              <div className="text-[26px] sm:text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
                                 {state.inbound.departTime}
                               </div>
                               <button
                                 type="button"
                                 onClick={() => openAirportPicker('inbound', 'depart')}
-                                className="mt-0.5 inline-flex items-center gap-1 text-[15px] font-extrabold text-[#21609E] hover:bg-[#DCEBFA]/60 px-1.5 py-0.5 -ml-1.5 rounded-lg transition max-w-full"
+                                className="mt-0.5 inline-flex flex-wrap items-center gap-1 text-left text-[14px] sm:text-[15px] font-extrabold text-[#21609E] hover:bg-[#DCEBFA]/60 px-1.5 py-0.5 -ml-1.5 rounded-lg transition max-w-full"
                               >
-                                <span className="truncate">{state.inbound.departCode}</span>
+                                <span className="leading-tight break-keep">{state.inbound.departCode}</span>
                                 {state.inbound.departTerminal && (
                                   <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#DCEBFA] text-[#1B5791] font-extrabold shrink-0">
                                     {state.inbound.departTerminal}
@@ -3942,33 +3917,33 @@ export default function App() {
                             </div>
 
                             {/* 航程/車程線 */}
-                            <div className="flex flex-col items-center px-1.5">
-                              <span className="text-[11px] font-bold text-[#5E4037] mb-1 text-center">
+                            <div className="flex flex-col items-center px-1">
+                              <span className="text-[10.5px] sm:text-[11px] font-bold text-[#5E4037] mb-1 text-center max-w-[96px] sm:max-w-[130px] leading-tight">
                                 {state.inbound.duration}
                               </span>
-                              <div className="w-24 sm:w-28 flex items-center">
+                              <div className="w-16 sm:w-24 flex items-center">
                                 <div className="h-[2px] flex-1 bg-[#7BB0E3]" />
                                 <span className="mx-1 text-[#1E5C99] text-xs font-bold">
                                   {inboundModeMeta.routeSymbol}
                                 </span>
                                 <div className="h-[2px] flex-1 bg-[#7BB0E3]" />
                               </div>
-                              <span className="text-[11px] font-bold text-[#225E96] mt-1 text-center line-clamp-1 max-w-[125px]">
+                              <span className="text-[10.5px] sm:text-[11px] font-bold text-[#225E96] mt-1 text-center line-clamp-1 max-w-[96px] sm:max-w-[130px]">
                                 {state.inbound.perkLabel}
                               </span>
                             </div>
 
                             {/* 回程抵達時間與站點 */}
                             <div className="text-right min-w-0" data-no-flip="true">
-                              <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
+                              <div className="text-[26px] sm:text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
                                 {state.inbound.arriveTime}
                               </div>
                               <button
                                 type="button"
                                 onClick={() => openAirportPicker('inbound', 'arrive')}
-                                className="mt-0.5 inline-flex items-center justify-end gap-1 text-[15px] font-extrabold text-[#21609E] hover:bg-[#DCEBFA]/60 px-1.5 py-0.5 -mr-1.5 rounded-lg transition max-w-full"
+                                className="mt-0.5 inline-flex flex-wrap items-center justify-end gap-1 text-right text-[14px] sm:text-[15px] font-extrabold text-[#21609E] hover:bg-[#DCEBFA]/60 px-1.5 py-0.5 -mr-1.5 rounded-lg transition max-w-full"
                               >
-                                <span className="truncate">{state.inbound.arriveCode}</span>
+                                <span className="leading-tight break-keep">{state.inbound.arriveCode}</span>
                                 {state.inbound.arriveTerminal && (
                                   <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#DCEBFA] text-[#1B5791] font-extrabold shrink-0">
                                     {state.inbound.arriveTerminal}
@@ -7102,14 +7077,15 @@ export default function App() {
             {/* 出發日期與回程日期旁即時顯示該日與目的地的預測天氣圖示與溫度 */}
             <div className="grid grid-cols-1 gap-2.5">
               <div className="min-w-0">
-                <div className="flex items-center justify-between gap-2 mb-1">
+                <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1">
                   <label className="text-xs font-bold text-[#4A6357]">
                     出發日期 (Start Date)
                   </label>
                   {startWeather ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#EAF7F0] border border-[#BDE5CE] text-[#14532D] text-[10.5px] font-extrabold shrink-0">
                       <span>{startWeather.emoji}</span>
-                      <span>{startWeather.conditionText}</span>
+                      <span>{startWeather.cityName}</span>
+                      <span className="opacity-60">·</span>
                       <span className="tabular-nums">
                         {startWeather.tempMin}°~{startWeather.tempMax}°C
                       </span>
@@ -7169,14 +7145,15 @@ export default function App() {
                 />
               </div>
               <div className="min-w-0">
-                <div className="flex items-center justify-between gap-2 mb-1">
+                <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1">
                   <label className="text-xs font-bold text-[#4A6357]">
                     回程日期 (End Date)
                   </label>
                   {endWeather ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#EAF7F0] border border-[#BDE5CE] text-[#14532D] text-[10.5px] font-extrabold shrink-0">
                       <span>{endWeather.emoji}</span>
-                      <span>{endWeather.conditionText}</span>
+                      <span>{endWeather.cityName}</span>
+                      <span className="opacity-60">·</span>
                       <span className="tabular-nums">
                         {endWeather.tempMin}°~{endWeather.tempMax}°C
                       </span>

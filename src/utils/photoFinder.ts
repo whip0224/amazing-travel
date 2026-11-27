@@ -88,41 +88,6 @@ async function fetchCommonsImage(searchQuery: string): Promise<string | null> {
   }
 }
 
-async function fetchGooglePlacesPhotos(query: string): Promise<string[]> {
-  try {
-    const g = (window as any).google;
-    if (!g?.maps?.places?.PlacesService) return [];
-    const dummy = document.createElement('div');
-    const service = new g.maps.places.PlacesService(dummy);
-    return await new Promise<string[]>((resolve) => {
-      const timeout = setTimeout(() => resolve([]), 2200);
-      service.textSearch({ query }, (results: any, status: any) => {
-        clearTimeout(timeout);
-        if (
-          status === g.maps.places.PlacesServiceStatus.OK &&
-          Array.isArray(results) &&
-          Array.isArray(results[0]?.photos)
-        ) {
-          const urls = results[0].photos
-            .slice(0, 5)
-            .map((ph: any) => (typeof ph?.getUrl === 'function' ? ph.getUrl({ maxWidth: 800 }) : ''))
-            .filter(Boolean);
-          resolve(urls);
-        } else {
-          resolve([]);
-        }
-      });
-    });
-  } catch {
-    return [];
-  }
-}
-
-async function fetchGooglePlacesPhoto(query: string): Promise<string | null> {
-  const photos = await fetchGooglePlacesPhotos(query);
-  return photos[0] || null;
-}
-
 function createDestinationPostcardDataUrl(title: string, subtitle: string, badge: string): string {
   const safeTitle = title.replace(/[<>&"']/g, '').slice(0, 18);
   const safeSub = (subtitle || '精選旅遊目的地').replace(/[<>&"']/g, '').slice(0, 28);
@@ -163,13 +128,7 @@ export async function findDestinationPhoto(
     }
   }
 
-  // 1. 先嘗試 Google Places Photo (若有載入 API Key)
-  const googlePhoto = await fetchGooglePlacesPhoto(`${cleanTitle} ${address || ''}`.trim());
-  if (googlePhoto) {
-    return { photoUrl: googlePhoto, photoBadge: matchedBadge };
-  }
-
-  // 2. 嘗試用景點乾淨名稱查詢中文維基百科與 Wikimedia Commons
+  // 1. 嘗試用景點乾淨名稱查詢中文維基百科與 Wikimedia Commons
   const zhDirect = await fetchWikiImage(cleanTitle, 'zh', true);
   if (zhDirect) {
     return { photoUrl: zhDirect, photoBadge: matchedBadge };
@@ -278,15 +237,7 @@ export async function findHotelPhoto(
     }
   }
 
-  // 2. 先嘗試 Google Places Photos (若環境中有載入 Google Maps Places SDK / VITE_GOOGLE_MAPS_API_KEY)
-  const googlePhotos = await fetchGooglePlacesPhotos(
-    `${cleanHotel} ${address || cityPart || ''} hotel`.trim()
-  );
-  if (googlePhotos.length > 0) {
-    candidates.push(...googlePhotos);
-  }
-
-  // 3. 呼叫伺服器端真實飯店圖片檢索（直接抓取該飯店的外觀與房間實景照）
+  // 2. 呼叫伺服器端真實飯店圖片檢索（直接抓取該飯店的外觀與房間實景照）
   const serverPhotos = await fetchServerRealHotelPhotos(rawHotel);
   candidates.push(...serverPhotos);
 
