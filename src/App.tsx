@@ -50,6 +50,7 @@ import {
   Search,
   Globe,
   PieChart as PieChartIcon,
+  Camera,
 } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import { CURRENCIES, type AirportItem } from './airports.js';
@@ -633,6 +634,7 @@ export default function App() {
     text: string;
   } | null>(null);
   const [isScanningReceipt, setIsScanningReceipt] = useState<boolean>(false);
+  const receiptCameraInputRef = useRef<HTMLInputElement | null>(null);
   const [scannedReceiptData, setScannedReceiptData] = useState<ScannedReceiptResult | null>(null);
   const [scannedReceiptPreviewUrl, setScannedReceiptPreviewUrl] = useState<string | null>(null);
   const [customPhraseInput, setCustomPhraseInput] = useState<string>('');
@@ -788,12 +790,12 @@ export default function App() {
     }
   };
 
-  // --- 🗓️ 根據使用者設定的 Start Date 與 End Date 動態產生旅行天數 ---
+  // --- 🗓️ 根據使用者設定的 Start Date 與 End Date 動態產生旅行天數（統一使用本地日期，避免 UTC 跨日誤差） ---
   const tripDays = useMemo(() => {
     const startStr = state.trip.startDate || '2027-04-12';
     const endStr = state.trip.endDate || '2027-04-16';
-    const s = new Date(startStr);
-    const e = new Date(endStr);
+    const s = new Date(`${startStr}T00:00:00`);
+    const e = new Date(`${endStr}T00:00:00`);
     if (isNaN(s.getTime()) || isNaN(e.getTime()) || s > e) {
       return [
         { index: 0, iso: '2027-04-12', label: 'Day 1', dateDisp: 'Mon, Apr 12', zhDisp: '4月12日 (週一)' },
@@ -808,7 +810,10 @@ export default function App() {
     let idx = 0;
     // 支援最多 30 天長途旅行
     while (curr <= e && idx < 30) {
-      const iso = curr.toISOString().split('T')[0];
+      const y = curr.getFullYear();
+      const m = String(curr.getMonth() + 1).padStart(2, '0');
+      const dNum = String(curr.getDate()).padStart(2, '0');
+      const iso = `${y}-${m}-${dNum}`;
       const enDisp = curr.toLocaleDateString('en-US', {
         weekday: 'short',
         month: 'short',
@@ -885,8 +890,9 @@ export default function App() {
     [state.trip.startDate, state.trip.endDate]
   );
 
-  // 當選中的 Day 超出新的日期範圍時自動修正，並自動將水平日期列捲動至選中的日期按鈕中央
+  // 當選中的 Day 改變時清除手動預覽鎖定、超出範圍時自動修正，並將日期列捲動至中央
   useEffect(() => {
+    setStayPreviewOverrideIndex(null);
     if (selectedDay >= tripDays.length) {
       setSelectedDay(Math.max(0, tripDays.length - 1));
       return;
@@ -1557,10 +1563,22 @@ export default function App() {
   const handleAddNewStay = (openModal = true) => {
     const currentList = staysList;
     const lastStay = currentList[currentList.length - 1];
-    const defaultInDate = lastStay?.checkOutDate || state.trip.startDate || '';
+    const tripStart = state.trip.startDate || '';
+    const tripEnd = state.trip.endDate || '';
+    let defaultInDate = lastStay?.checkOutDate || tripStart;
+    if (
+      tripEnd &&
+      lastStay?.checkInDate &&
+      (!defaultInDate || defaultInDate >= tripEnd)
+    ) {
+      const nextAfterLastIn = addDaysIso(lastStay.checkInDate, 1);
+      if (nextAfterLastIn < tripEnd) {
+        defaultInDate = nextAfterLastIn;
+      }
+    }
     let defaultOutDate =
-      state.trip.endDate && defaultInDate && state.trip.endDate > defaultInDate
-        ? state.trip.endDate
+      tripEnd && defaultInDate && tripEnd > defaultInDate
+        ? tripEnd
         : defaultInDate
         ? addDaysIso(defaultInDate, 1)
         : '';
@@ -1595,7 +1613,7 @@ export default function App() {
       stay: nextList[0] || prev.stay,
     }));
     setEditingStayIndex(newIndex);
-    setStayPreviewOverrideIndex(newIndex);
+    setStayPreviewOverrideIndex(null);
     setHotelCandidates([]);
     if (openModal) {
       setShowStayModal(true);
@@ -4148,6 +4166,16 @@ export default function App() {
                         </div>
                       )}
 
+                      {stayPreviewOverrideIndex !== null && (
+                        <button
+                          type="button"
+                          onClick={() => setStayPreviewOverrideIndex(null)}
+                          className="w-full px-3 py-1.5 rounded-xl bg-[#EEF6F2] border border-[#CFE2D8] text-[#1A5D42] text-[11px] font-bold text-left hover:bg-[#E1EFE8] transition"
+                        >
+                          👁️ 目前為快速預覽第 {displayedStayIndex + 1} 間飯店（點此或點上方日期切回 {activeStayDay?.zhDisp} 當晚住宿）
+                        </button>
+                      )}
+
                       {displayedStayStatus === 'checkout' && (
                         <div className="px-3 py-1.5 rounded-xl bg-[#FFF4EC] border border-[#F4CEB6] text-[#9E3516] text-[11px] font-bold flex items-center justify-between gap-2">
                           <span>
@@ -5179,20 +5207,43 @@ export default function App() {
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      <label
-                        className={`px-2.5 py-1 rounded-full text-[11.5px] font-extrabold flex items-center gap-1 transition shadow-2xs cursor-pointer ${
+                      <input
+                        ref={receiptCameraInputRef}
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        className="hidden"
+                        disabled={isScanningReceipt}
+                        onChange={handleScanReceiptFile}
+                      />
+                      <button
+                        type="button"
+                        disabled={isScanningReceipt}
+                        onClick={() => receiptCameraInputRef.current?.click()}
+                        className={`px-2.5 py-1 rounded-full text-[11.5px] font-extrabold flex items-center gap-1 transition shadow-2xs ${
                           isScanningReceipt
-                            ? 'bg-[#1A5D42] text-white opacity-75 pointer-events-none'
-                            : 'bg-[#FCE3DA] hover:bg-[#f7d0c1] text-[#B83E1B] border border-[#F3C5B4]'
+                            ? 'bg-[#1A5D42] text-white opacity-75 cursor-not-allowed'
+                            : 'bg-[#1A5D42] hover:bg-[#134631] text-white'
                         }`}
-                        title="拍日本收據或菜單（自動縮小至 1200px 並由 Gemini AI 自動辨識品項與金額）"
+                        title="直接開啟手機相機拍攝收據或菜單並由 AI 自動辨識記帳"
                       >
                         {isScanningReceipt ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
                         ) : (
-                          <span>📸</span>
+                          <Camera className="w-3.5 h-3.5" />
                         )}
-                        <span>{isScanningReceipt ? 'AI 辨識中...' : 'AI 拍收據'}</span>
+                        <span>{isScanningReceipt ? 'AI 辨識中...' : '相機拍收據'}</span>
+                      </button>
+                      <label
+                        className={`px-2.5 py-1 rounded-full text-[11.5px] font-extrabold flex items-center gap-1 transition shadow-2xs cursor-pointer ${
+                          isScanningReceipt
+                            ? 'bg-[#FCE3DA] text-[#B83E1B] opacity-60 pointer-events-none'
+                            : 'bg-[#FCE3DA] hover:bg-[#f7d0c1] text-[#B83E1B] border border-[#F3C5B4]'
+                        }`}
+                        title="從相簿選擇收據或菜單照片（自動縮小至 1200px 並由 Gemini AI 自動辨識品項與金額）"
+                      >
+                        <span>🖼️</span>
+                        <span>相簿選圖</span>
                         <input
                           type="file"
                           accept="image/*"
@@ -5699,15 +5750,31 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* ➕ ＋ 新增一筆支出 (Add Expense) 主按鈕 */}
-                  <button
-                    type="button"
-                    onClick={() => setShowAddExpenseModal(true)}
-                    className="w-full py-4 rounded-[22px] bg-[#DF6437] hover:bg-[#cc562b] text-white font-extrabold text-[15.5px] flex items-center justify-center gap-2 shadow-md transition active:scale-99"
-                  >
-                    <Plus className="w-5 h-5 stroke-[2.5] rounded-full border-2 border-white p-0.5" />
-                    <span>＋ 新增一筆支出 (Add Expense)</span>
-                  </button>
+                  {/* 📷 相機直拍掃描收據 + ➕ 新增一筆支出主按鈕 */}
+                  <div className="grid grid-cols-[auto_1fr] gap-2.5">
+                    <button
+                      type="button"
+                      disabled={isScanningReceipt}
+                      onClick={() => receiptCameraInputRef.current?.click()}
+                      className="px-4 py-4 rounded-[22px] bg-[#1A5D42] hover:bg-[#134631] disabled:opacity-70 text-white font-extrabold text-[14px] flex items-center justify-center gap-1.5 shadow-md transition active:scale-99 shrink-0"
+                      title="直接開啟手機鏡頭拍攝收據並自動辨識品項與金額"
+                    >
+                      {isScanningReceipt ? (
+                        <Loader2 className="w-4.5 h-4.5 animate-spin" />
+                      ) : (
+                        <Camera className="w-4.5 h-4.5" />
+                      )}
+                      <span>{isScanningReceipt ? '辨識中' : '拍收據'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddExpenseModal(true)}
+                      className="w-full py-4 rounded-[22px] bg-[#DF6437] hover:bg-[#cc562b] text-white font-extrabold text-[15px] flex items-center justify-center gap-2 shadow-md transition active:scale-99"
+                    >
+                      <Plus className="w-5 h-5 stroke-[2.5] rounded-full border-2 border-white p-0.5" />
+                      <span>新增一筆支出</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -6535,14 +6602,26 @@ export default function App() {
         const modalStayIndex = Math.min(editingStayIndex, Math.max(0, staysList.length - 1));
         const modalStay = staysList[modalStayIndex] || staysList[0];
         const nightsCount = getStayNights(modalStay);
+        const closeStayModalAndSync = () => {
+          setState((prev) => {
+            const sorted = sortStaysByDate(normalizeStaysList(prev));
+            return {
+              ...prev,
+              stays: sorted,
+              stay: sorted[0] || prev.stay,
+            };
+          });
+          setStayPreviewOverrideIndex(null);
+          setShowStayModal(false);
+        };
         return (
           <div
-            className="fixed inset-0 z-[150] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
-            onClick={() => setShowStayModal(false)}
+            className="fixed inset-0 z-[150] bg-black/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
+            onClick={closeStayModalAndSync}
           >
             <div
               onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-md bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3 max-h-[90vh] overflow-y-auto tabi-scroll"
+              className="w-full max-w-md bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3 max-h-[calc(100dvh-1.5rem)] sm:max-h-[90dvh] overflow-y-auto tabi-scroll"
             >
               <div className="flex items-center justify-between border-b border-[#EBF3EE] pb-2">
                 <div>
@@ -6555,7 +6634,7 @@ export default function App() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setShowStayModal(false)}
+                  onClick={closeStayModalAndSync}
                   className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center shrink-0"
                 >
                   <X className="w-4 h-4" />
@@ -6971,7 +7050,7 @@ export default function App() {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3 overflow-hidden"
+            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3 max-h-[calc(100dvh-1.5rem)] sm:max-h-[90dvh] overflow-y-auto tabi-scroll"
           >
             <div className="flex items-center justify-between border-b border-[#EBF3EE] pb-2">
               <div>
@@ -7046,18 +7125,45 @@ export default function App() {
                   onChange={(e) => {
                     const nextStart = e.target.value;
                     const nextOutboundDateLabel = formatFlightDateLabel(nextStart, 'outbound');
-                    setState((prev) => ({
-                      ...prev,
-                      trip: {
-                        ...prev.trip,
-                        startDate: nextStart,
-                        dateRangeLabel: formatTripDateRangeLabel(nextStart, prev.trip.endDate),
-                      },
-                      outbound: {
-                        ...prev.outbound,
-                        ...(nextOutboundDateLabel ? { dateLabel: nextOutboundDateLabel } : {}),
-                      },
-                    }));
+                    setState((prev) => {
+                      const prevStays = normalizeStaysList(prev);
+                      let nextStays = prevStays;
+                      if (prevStays.length === 1) {
+                        const only = prevStays[0];
+                        if (!only.checkInDate || only.checkInDate === prev.trip.startDate) {
+                          const nextCheckOut =
+                            only.checkOutDate && nextStart && only.checkOutDate <= nextStart
+                              ? addDaysIso(nextStart, 1)
+                              : only.checkOutDate;
+                          nextStays = [
+                            normalizeStayItem(
+                              {
+                                ...only,
+                                checkInDate: nextStart,
+                                checkOutDate: nextCheckOut,
+                              },
+                              0,
+                              nextStart,
+                              prev.trip.endDate
+                            ),
+                          ];
+                        }
+                      }
+                      return {
+                        ...prev,
+                        trip: {
+                          ...prev.trip,
+                          startDate: nextStart,
+                          dateRangeLabel: formatTripDateRangeLabel(nextStart, prev.trip.endDate),
+                        },
+                        outbound: {
+                          ...prev.outbound,
+                          ...(nextOutboundDateLabel ? { dateLabel: nextOutboundDateLabel } : {}),
+                        },
+                        stays: nextStays,
+                        stay: nextStays[0] || prev.stay,
+                      };
+                    });
                   }}
                   className="w-full max-w-full min-w-0 block px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
                 />
@@ -7086,18 +7192,40 @@ export default function App() {
                   onChange={(e) => {
                     const nextEnd = e.target.value;
                     const nextInboundDateLabel = formatFlightDateLabel(nextEnd, 'inbound');
-                    setState((prev) => ({
-                      ...prev,
-                      trip: {
-                        ...prev.trip,
-                        endDate: nextEnd,
-                        dateRangeLabel: formatTripDateRangeLabel(prev.trip.startDate, nextEnd),
-                      },
-                      inbound: {
-                        ...prev.inbound,
-                        ...(nextInboundDateLabel ? { dateLabel: nextInboundDateLabel } : {}),
-                      },
-                    }));
+                    setState((prev) => {
+                      const prevStays = normalizeStaysList(prev);
+                      let nextStays = prevStays;
+                      if (prevStays.length === 1) {
+                        const only = prevStays[0];
+                        if (!only.checkOutDate || only.checkOutDate === prev.trip.endDate) {
+                          nextStays = [
+                            normalizeStayItem(
+                              {
+                                ...only,
+                                checkOutDate: nextEnd,
+                              },
+                              0,
+                              prev.trip.startDate,
+                              nextEnd
+                            ),
+                          ];
+                        }
+                      }
+                      return {
+                        ...prev,
+                        trip: {
+                          ...prev.trip,
+                          endDate: nextEnd,
+                          dateRangeLabel: formatTripDateRangeLabel(prev.trip.startDate, nextEnd),
+                        },
+                        inbound: {
+                          ...prev.inbound,
+                          ...(nextInboundDateLabel ? { dateLabel: nextInboundDateLabel } : {}),
+                        },
+                        stays: nextStays,
+                        stay: nextStays[0] || prev.stay,
+                      };
+                    });
                   }}
                   className="w-full max-w-full min-w-0 block px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
                 />

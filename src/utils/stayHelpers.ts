@@ -152,30 +152,51 @@ export function findStayForDate(stays: StayInfo[], dateIso?: string): StayMatchR
       status: 'unassigned',
     };
   }
-  if (!dateIso || !/^\d{4}-\d{2}-\d{2}$/.test(dateIso)) {
+  const targetIso = (dateIso || '').trim();
+  if (!targetIso || !/^\d{4}-\d{2}-\d{2}$/.test(targetIso)) {
     return { stay: stays[0], index: 0, status: 'staying' };
   }
 
-  // 1. 優先比對入住當晚：checkInDate <= dateIso < checkOutDate
-  let stayingIdx = -1;
+  // 1. 優先比對入住當晚：checkInDate <= targetIso < checkOutDate
+  // 若多間飯店日期重疊（例如第一間預設涵蓋整段旅程），優先選擇 checkInDate 較晚（或住宿天數較精準）的那間
+  const stayingCandidates: { idx: number; stay: StayInfo; ci: string; nights: number }[] = [];
   stays.forEach((s, idx) => {
-    const ci = s.checkInDate;
-    const co = s.checkOutDate;
+    const ci = (s.checkInDate || '').trim();
+    const co = (s.checkOutDate || '').trim();
     if (!ci) return;
-    if (co && ci <= dateIso && dateIso < co) {
-      stayingIdx = idx;
-    } else if (!co && ci === dateIso) {
-      stayingIdx = idx;
+    if (co && ci <= targetIso && targetIso < co) {
+      stayingCandidates.push({ idx, stay: s, ci, nights: getStayNights(s) || 999 });
+    } else if (!co && ci === targetIso) {
+      stayingCandidates.push({ idx, stay: s, ci, nights: 1 });
     }
   });
-  if (stayingIdx !== -1) {
-    return { stay: stays[stayingIdx], index: stayingIdx, status: 'staying' };
+
+  if (stayingCandidates.length > 0) {
+    stayingCandidates.sort((a, b) => {
+      if (a.ci !== b.ci) return b.ci.localeCompare(a.ci); // 較晚入住優先
+      if (a.nights !== b.nights) return a.nights - b.nights; // 較精準區間優先
+      return b.idx - a.idx;
+    });
+    const best = stayingCandidates[0];
+    return { stay: best.stay, index: best.idx, status: 'staying' };
   }
 
-  // 2. 次優先比對退房日：dateIso === checkOutDate（例如旅程最後一天）
-  const checkoutIdx = stays.findIndex((s) => s.checkOutDate === dateIso);
-  if (checkoutIdx !== -1) {
-    return { stay: stays[checkoutIdx], index: checkoutIdx, status: 'checkout' };
+  // 2. 次優先比對退房日：targetIso === checkOutDate（多筆同日退房時，取較晚入住的那間）
+  const checkoutCandidates: { idx: number; stay: StayInfo; ci: string }[] = [];
+  stays.forEach((s, idx) => {
+    const ci = (s.checkInDate || '').trim();
+    const co = (s.checkOutDate || '').trim();
+    if (co === targetIso) {
+      checkoutCandidates.push({ idx, stay: s, ci });
+    }
+  });
+  if (checkoutCandidates.length > 0) {
+    checkoutCandidates.sort((a, b) => {
+      if (a.ci !== b.ci) return b.ci.localeCompare(a.ci);
+      return b.idx - a.idx;
+    });
+    const bestOut = checkoutCandidates[0];
+    return { stay: bestOut.stay, index: bestOut.idx, status: 'checkout' };
   }
 
   // 3. 若單間住宿尚未設定起訖日期，預設視為全行程住宿
@@ -185,10 +206,13 @@ export function findStayForDate(stays: StayInfo[], dateIso?: string): StayMatchR
 
   // 4. 找不到精準日期時回退至最接近的住宿（提示尚未指派該晚）
   let fallbackIdx = 0;
-  for (let i = 0; i < stays.length; i++) {
-    if (stays[i].checkInDate && stays[i].checkInDate! <= dateIso) {
-      fallbackIdx = i;
+  let bestFallbackCi = '';
+  stays.forEach((s, idx) => {
+    const ci = (s.checkInDate || '').trim();
+    if (ci && ci <= targetIso && ci >= bestFallbackCi) {
+      bestFallbackCi = ci;
+      fallbackIdx = idx;
     }
-  }
+  });
   return { stay: stays[fallbackIdx], index: fallbackIdx, status: 'unassigned' };
 }

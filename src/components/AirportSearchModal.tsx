@@ -90,6 +90,7 @@ export const AirportSearchModal: React.FC<AirportSearchModalProps> = ({
   const [customHubCode, setCustomHubCode] = useState('');
   const [customHubCity, setCustomHubCity] = useState('');
   const [customHubTerminal, setCustomHubTerminal] = useState('');
+  const scrollToSettingsRef = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
     if (open) {
@@ -226,15 +227,15 @@ export const AirportSearchModal: React.FC<AirportSearchModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-[210] bg-black/55 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
+      className="fixed inset-0 z-[210] bg-black/55 backdrop-blur-xs flex items-center justify-center p-2.5 sm:p-4"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-lg max-h-[92vh] bg-[#F4FAF6] rounded-3xl shadow-2xl border border-[#CBE2D6] flex flex-col overflow-hidden text-[#162A22]"
+        className="w-full max-w-lg max-h-[calc(100dvh-1.25rem)] sm:max-h-[90dvh] bg-[#F4FAF6] rounded-3xl shadow-2xl border border-[#CBE2D6] flex flex-col overflow-hidden text-[#162A22]"
       >
         {/* 頂部標題列 */}
-        <div className="px-5 pt-4 pb-3 bg-white border-b border-[#DCEAE2] flex items-center justify-between gap-2">
+        <div className="px-4 sm:px-5 pt-3.5 pb-2.5 bg-white border-b border-[#DCEAE2] flex items-center justify-between gap-2 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <span className="w-9 h-9 rounded-2xl bg-[#FCE1D6] text-[#C24726] flex items-center justify-center shrink-0 text-lg">
               {isFlightMode ? <PlaneTakeoff className="w-5 h-5" /> : <span>{modeMeta.icon}</span>}
@@ -261,7 +262,7 @@ export const AirportSearchModal: React.FC<AirportSearchModalProps> = ({
         </div>
 
         {/* 交通工具模式切換列 (飛機 / 高鐵 / 巴士 / 自駕 / 船班) */}
-        <div className="px-4 py-2 bg-[#F8FBF9] border-b border-[#DCEAE2] grid grid-cols-5 gap-1">
+        <div className="px-3.5 sm:px-4 py-2 bg-[#F8FBF9] border-b border-[#DCEAE2] grid grid-cols-5 gap-1 shrink-0">
           {ALL_MODES.map((m) => {
             const meta = TRANSPORT_MODE_META[m];
             const active = activeMode === m;
@@ -292,154 +293,172 @@ export const AirportSearchModal: React.FC<AirportSearchModalProps> = ({
           })}
         </div>
 
-        {/* 選擇要設定的去程 / 回程站點槽位 */}
-        <div className="px-4 py-2 bg-[#EAF4EF] border-b border-[#D6E8DF] grid grid-cols-4 gap-1.5">
-          {[
-            {
-              leg: 'outbound' as const,
-              direction: 'depart' as const,
-              label: '去程出發',
-              code: outbound.departCode,
-              term: outbound.departTerminal,
-            },
-            {
-              leg: 'outbound' as const,
-              direction: 'arrive' as const,
-              label: '去程抵達',
-              code: outbound.arriveCode,
-              term: outbound.arriveTerminal,
-            },
-            {
-              leg: 'inbound' as const,
-              direction: 'depart' as const,
-              label: '回程出發',
-              code: inbound.departCode,
-              term: inbound.departTerminal,
-            },
-            {
-              leg: 'inbound' as const,
-              direction: 'arrive' as const,
-              label: '回程抵達',
-              code: inbound.arriveCode,
-              term: inbound.arriveTerminal,
-            },
-          ].map((slot) => {
-            const isActive =
-              activeSlot.leg === slot.leg && activeSlot.direction === slot.direction;
-            return (
-              <button
-                key={`${slot.leg}-${slot.direction}`}
-                type="button"
-                onClick={() => setActiveSlot({ leg: slot.leg, direction: slot.direction })}
-                className={`p-2 rounded-2xl text-left transition border ${
-                  isActive
-                    ? 'bg-[#1A5D42] text-white border-[#1A5D42] shadow-xs'
-                    : 'bg-white text-[#243E32] border-[#D8E8DF] hover:bg-[#F8FCFA]'
-                }`}
-              >
-                <div className="text-[10px] font-bold opacity-85 flex items-center gap-1">
-                  {isFlightMode ? (
-                    slot.direction === 'depart' ? (
-                      <PlaneTakeoff className="w-3 h-3 shrink-0" />
+        {/* 選擇要設定的去程 / 回程站點槽位 + 快速跳轉時間設定 */}
+        <div className="px-3.5 sm:px-4 py-2 bg-[#EAF4EF] border-b border-[#D6E8DF] space-y-1.5 shrink-0">
+          <div className="grid grid-cols-4 gap-1.5">
+            {[
+              {
+                leg: 'outbound' as const,
+                direction: 'depart' as const,
+                label: '去程出發',
+                code: outbound.departCode,
+                term: outbound.departTerminal,
+              },
+              {
+                leg: 'outbound' as const,
+                direction: 'arrive' as const,
+                label: '去程抵達',
+                code: outbound.arriveCode,
+                term: outbound.arriveTerminal,
+              },
+              {
+                leg: 'inbound' as const,
+                direction: 'depart' as const,
+                label: '回程出發',
+                code: inbound.departCode,
+                term: inbound.departTerminal,
+              },
+              {
+                leg: 'inbound' as const,
+                direction: 'arrive' as const,
+                label: '回程抵達',
+                code: inbound.arriveCode,
+                term: inbound.arriveTerminal,
+              },
+            ].map((slot) => {
+              const isActive =
+                activeSlot.leg === slot.leg && activeSlot.direction === slot.direction;
+              return (
+                <button
+                  key={`${slot.leg}-${slot.direction}`}
+                  type="button"
+                  onClick={() => setActiveSlot({ leg: slot.leg, direction: slot.direction })}
+                  className={`p-2 rounded-2xl text-left transition border ${
+                    isActive
+                      ? 'bg-[#1A5D42] text-white border-[#1A5D42] shadow-xs'
+                      : 'bg-white text-[#243E32] border-[#D8E8DF] hover:bg-[#F8FCFA]'
+                  }`}
+                >
+                  <div className="text-[10px] font-bold opacity-85 flex items-center gap-1">
+                    {isFlightMode ? (
+                      slot.direction === 'depart' ? (
+                        <PlaneTakeoff className="w-3 h-3 shrink-0" />
+                      ) : (
+                        <PlaneLanding className="w-3 h-3 shrink-0" />
+                      )
                     ) : (
-                      <PlaneLanding className="w-3 h-3 shrink-0" />
-                    )
-                  ) : (
-                    <MapPin className="w-3 h-3 shrink-0" />
-                  )}
-                  <span className="truncate">{slot.label}</span>
-                </div>
-                <div className="text-xs font-black mt-0.5 flex items-center justify-between gap-1">
-                  <span className="truncate">{slot.code}</span>
-                  {slot.term && (
-                    <span
-                      className={`text-[9px] px-1 py-0.2 rounded-md font-bold shrink-0 max-w-[46px] truncate ${
-                        isActive
-                          ? 'bg-white/20 text-white'
-                          : 'bg-[#E5F1EC] text-[#1A5D42]'
-                      }`}
-                    >
-                      {slot.term}
-                    </span>
-                  )}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* 搜尋輸入框 + 分類篩選 */}
-        <div className="p-3.5 pb-2.5 bg-white border-b border-[#E2EFE8] space-y-2">
-          <div className="relative">
-            <Search className="w-4 h-4 text-[#5B7368] absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={
-                isFlightMode
-                  ? '輸入機場名稱、城市、代碼 (如：桃園、TPE、羽田、KIX)...'
-                  : '搜尋車站、口岸或碼頭 (如：珠海、拱北、金巴、西九龍、九洲港)...'
-              }
-              className="w-full pl-10 pr-9 py-2 rounded-2xl bg-[#EEF6F2] border border-[#CFE3D8] text-xs sm:text-sm font-bold text-[#14241D] placeholder:text-[#758C81] focus:outline-none focus:border-[#1A5D42] focus:bg-white transition"
-            />
-            {searchQuery && (
-              <button
-                type="button"
-                onClick={() => setSearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-[#D5E6DD] text-[#2F4D3F] flex items-center justify-center text-xs"
-              >
-                ✕
-              </button>
-            )}
+                      <MapPin className="w-3 h-3 shrink-0" />
+                    )}
+                    <span className="truncate">{slot.label}</span>
+                  </div>
+                  <div className="text-xs font-black mt-0.5 flex items-center justify-between gap-1">
+                    <span className="truncate">{slot.code}</span>
+                    {slot.term && (
+                      <span
+                        className={`text-[9px] px-1 py-0.2 rounded-md font-bold shrink-0 max-w-[46px] truncate ${
+                          isActive
+                            ? 'bg-white/20 text-white'
+                            : 'bg-[#E5F1EC] text-[#1A5D42]'
+                        }`}
+                      >
+                        {slot.term}
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
           </div>
 
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10.5px] font-bold text-[#355245] truncate">
+              目前編輯：{activeSlot.leg === 'outbound' ? '去程' : '回程'} ·{' '}
+              {currentLegObj.departCode} → {currentLegObj.arriveCode} ({currentLegObj.departTime}–{currentLegObj.arriveTime})
+            </span>
             <button
               type="button"
-              onClick={() => setCountryFilter('ALL')}
-              className={`px-3 py-1 rounded-full text-xs font-extrabold shrink-0 transition ${
-                countryFilter === 'ALL'
-                  ? 'bg-[#C24726] text-white'
-                  : 'bg-[#EEF6F2] text-[#355245] hover:bg-[#e0ede6]'
-              }`}
+              onClick={() =>
+                scrollToSettingsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }
+              className="px-2.5 py-0.5 rounded-full bg-white hover:bg-[#FCE1D6] text-[#B8431F] border border-[#F0CFC2] text-[10.5px] font-extrabold shrink-0 transition"
             >
-              🌍 全部 ({isFlightMode ? flattenedAirports.length : flattenedLandHubs.length})
+              🕒 編輯時間與班次 ↓
             </button>
-            {isFlightMode
-              ? AIRPORTS_BY_COUNTRY.map((grp) => (
-                  <button
-                    key={grp.country}
-                    type="button"
-                    onClick={() => setCountryFilter(grp.country)}
-                    className={`px-3 py-1 rounded-full text-xs font-extrabold shrink-0 transition ${
-                      countryFilter === grp.country
-                        ? 'bg-[#C24726] text-white'
-                        : 'bg-[#EEF6F2] text-[#355245] hover:bg-[#e0ede6]'
-                    }`}
-                  >
-                    {grp.flag} {grp.country.split(' ')[0]}
-                  </button>
-                ))
-              : LAND_HUBS_BY_REGION.map((grp) => (
-                  <button
-                    key={grp.region}
-                    type="button"
-                    onClick={() => setCountryFilter(grp.region)}
-                    className={`px-3 py-1 rounded-full text-xs font-extrabold shrink-0 transition ${
-                      countryFilter === grp.region
-                        ? 'bg-[#C24726] text-white'
-                        : 'bg-[#EEF6F2] text-[#355245] hover:bg-[#e0ede6]'
-                    }`}
-                  >
-                    {grp.flag} {grp.region.split(' ')[0]}
-                  </button>
-                ))}
           </div>
         </div>
 
-        {/* 主列表區：飛機模式顯示機場清單；陸路/海陸模式顯示一鍵路線 + 車站口岸 + 自訂站名 */}
-        <div className="flex-1 overflow-y-auto p-3.5 space-y-2.5 tabi-scroll">
+        {/* 統一可捲動主內容區：搜尋框 + 路線/站點清單 + 去回程時間/班次/備註設定（確保任何裝置都可完整捲動到底） */}
+        <div className="flex-1 min-h-0 overflow-y-auto tabi-scroll p-3.5 space-y-2.5">
+          {/* 搜尋輸入框 + 分類篩選 */}
+          <div className="bg-white rounded-2xl p-3 border border-[#DCEAE2] space-y-2">
+            <div className="relative">
+              <Search className="w-4 h-4 text-[#5B7368] absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={
+                  isFlightMode
+                    ? '輸入機場名稱、城市、代碼 (如：桃園、TPE、羽田、KIX)...'
+                    : '搜尋車站、口岸或碼頭 (如：珠海、拱北、金巴、西九龍、九洲港)...'
+                }
+                className="w-full pl-10 pr-9 py-2 rounded-2xl bg-[#EEF6F2] border border-[#CFE3D8] text-xs sm:text-sm font-bold text-[#14241D] placeholder:text-[#758C81] focus:outline-none focus:border-[#1A5D42] focus:bg-white transition"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-[#D5E6DD] text-[#2F4D3F] flex items-center justify-center text-xs"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+              <button
+                type="button"
+                onClick={() => setCountryFilter('ALL')}
+                className={`px-3 py-1 rounded-full text-xs font-extrabold shrink-0 transition ${
+                  countryFilter === 'ALL'
+                    ? 'bg-[#C24726] text-white'
+                    : 'bg-[#EEF6F2] text-[#355245] hover:bg-[#e0ede6]'
+                }`}
+              >
+                🌍 全部 ({isFlightMode ? flattenedAirports.length : flattenedLandHubs.length})
+              </button>
+              {isFlightMode
+                ? AIRPORTS_BY_COUNTRY.map((grp) => (
+                    <button
+                      key={grp.country}
+                      type="button"
+                      onClick={() => setCountryFilter(grp.country)}
+                      className={`px-3 py-1 rounded-full text-xs font-extrabold shrink-0 transition ${
+                        countryFilter === grp.country
+                          ? 'bg-[#C24726] text-white'
+                          : 'bg-[#EEF6F2] text-[#355245] hover:bg-[#e0ede6]'
+                      }`}
+                    >
+                      {grp.flag} {grp.country.split(' ')[0]}
+                    </button>
+                  ))
+                : LAND_HUBS_BY_REGION.map((grp) => (
+                    <button
+                      key={grp.region}
+                      type="button"
+                      onClick={() => setCountryFilter(grp.region)}
+                      className={`px-3 py-1 rounded-full text-xs font-extrabold shrink-0 transition ${
+                        countryFilter === grp.region
+                          ? 'bg-[#C24726] text-white'
+                          : 'bg-[#EEF6F2] text-[#355245] hover:bg-[#e0ede6]'
+                      }`}
+                    >
+                      {grp.flag} {grp.region.split(' ')[0]}
+                    </button>
+                  ))}
+            </div>
+          </div>
+
           {!isFlightMode ? (
             <>
               {/* 一鍵套用熱門珠海 / 港珠澳 / 高鐵來回路線 */}
@@ -694,233 +713,239 @@ export const AirportSearchModal: React.FC<AirportSearchModalProps> = ({
               );
             })
           )}
-        </div>
 
-        {/* 底部當前去程/回程時間、班次號與營運商設定 */}
-        <div className="p-4 bg-white border-t border-[#DCEAE2] space-y-2.5 overflow-hidden">
-          <div className="flex items-center justify-between gap-2 text-xs font-extrabold text-[#1A5D42]">
-            <span className="flex items-center gap-1 min-w-0 truncate">
-              <Sparkles className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">
-                {activeSlot.leg === 'outbound' ? '去程 (Outbound)' : '回程 (Return)'}{' '}
-                {isFlightMode ? '時間與航班號設定' : `時間與${modeMeta.shortLabel}班次`}
+          {/* 當前去程/回程時間、班次號、備註與營運商設定卡片（放入捲動區內，確保最底部的輸入欄不會被裁切） */}
+          <div
+            ref={scrollToSettingsRef}
+            className="p-3.5 bg-white rounded-2xl border border-[#CBE2D6] space-y-2.5 shadow-2xs"
+          >
+            <div className="flex items-center justify-between gap-2 text-xs font-extrabold text-[#1A5D42]">
+              <span className="flex items-center gap-1 min-w-0 truncate">
+                <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">
+                  {activeSlot.leg === 'outbound' ? '去程 (Outbound)' : '回程 (Return)'}{' '}
+                  {isFlightMode ? '時間與航班號設定' : `時間與${modeMeta.shortLabel}班次`}
+                </span>
               </span>
-            </span>
-            <input
-              type="text"
-              value={airlineLabel}
-              onChange={(e) => onUpdateAirlineLabel(e.target.value)}
-              placeholder={modeMeta.operatorPlaceholder}
-              className="px-2.5 py-1 rounded-lg bg-[#F4FAF6] border border-[#DCEAE2] text-[11px] font-bold text-right w-40 sm:w-48 shrink-0"
-            />
-          </div>
-
-          {/* 班次 / 航班號 */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-[10.5px] font-bold text-[#5A7066]">
-                {isFlightMode
-                  ? '航班編號（輸入後點「自動帶入」可自動填寫起降機場與時間）'
-                  : '車次 / 班次名稱 / 車牌備註'}
-              </label>
-            </div>
-            <div className="flex items-center gap-2">
               <input
                 type="text"
-                value={currentLegObj.flightNo}
-                onChange={(e) => {
-                  onUpdateFlightMeta(activeSlot.leg, { flightNo: e.target.value });
-                  setLookupFeedback(null);
-                }}
-                onKeyDown={async (e) => {
-                  if (e.key === 'Enter' && isFlightMode) {
-                    e.preventDefault();
-                    setIsLookingUpFlight(true);
-                    setPairedReturnOffer(null);
-                    try {
-                      const res = await lookupFlightByNumber(
-                        currentLegObj.flightNo,
-                        activeSlot.leg,
-                        currentLegObj,
-                        startDate,
-                        endDate
-                      );
-                      onUpdateFlightMeta(activeSlot.leg, res.updates);
-                      if (res.airlineLabel) {
-                        onUpdateAirlineLabel(res.airlineLabel);
-                      }
-                      setLookupFeedback(res.message);
-                      if (res.pairedReturnFlightNo && res.pairedReturnUpdates) {
-                        setPairedReturnOffer({
-                          flightNo: res.pairedReturnFlightNo,
-                          updates: res.pairedReturnUpdates,
-                        });
-                      }
-                    } finally {
-                      setIsLookingUpFlight(false);
-                    }
-                  }
-                }}
-                placeholder={modeMeta.numberPlaceholder}
-                className="flex-1 min-w-0 px-3 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-extrabold text-[#14241D]"
+                value={airlineLabel}
+                onChange={(e) => onUpdateAirlineLabel(e.target.value)}
+                placeholder={modeMeta.operatorPlaceholder}
+                className="px-2.5 py-1 rounded-lg bg-[#F4FAF6] border border-[#DCEAE2] text-[11px] font-bold text-right w-36 sm:w-48 shrink-0"
               />
-              {isFlightMode && (
-                <button
-                  type="button"
-                  disabled={isLookingUpFlight}
-                  onClick={async () => {
-                    setIsLookingUpFlight(true);
-                    setPairedReturnOffer(null);
-                    try {
-                      const res = await lookupFlightByNumber(
-                        currentLegObj.flightNo,
-                        activeSlot.leg,
-                        currentLegObj,
-                        startDate,
-                        endDate
-                      );
-                      onUpdateFlightMeta(activeSlot.leg, res.updates);
-                      if (res.airlineLabel) {
-                        onUpdateAirlineLabel(res.airlineLabel);
-                      }
-                      setLookupFeedback(res.message);
-                      if (res.pairedReturnFlightNo && res.pairedReturnUpdates) {
-                        setPairedReturnOffer({
-                          flightNo: res.pairedReturnFlightNo,
-                          updates: res.pairedReturnUpdates,
-                        });
-                      }
-                    } finally {
-                      setIsLookingUpFlight(false);
-                    }
-                  }}
-                  className="px-3 py-1.5 rounded-xl bg-[#E3F2EA] hover:bg-[#CFE8DB] text-[#165C3E] text-xs font-extrabold flex items-center gap-1.5 shrink-0 transition disabled:opacity-50"
-                >
-                  {isLookingUpFlight ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <span>🔍</span>
-                  )}
-                  <span>{isLookingUpFlight ? '查詢中...' : '自動帶入'}</span>
-                </button>
-              )}
             </div>
 
-            {lookupFeedback && (
-              <div className="mt-1.5 px-2.5 py-1.5 rounded-xl bg-[#EAF4EF] border border-[#CFE3D8] text-[11px] font-bold text-[#1A5D42] flex items-center justify-between gap-2 flex-wrap">
-                <span>{lookupFeedback}</span>
-                {pairedReturnOffer && (
+            {/* 班次 / 航班號 */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[10.5px] font-bold text-[#5A7066]">
+                  {isFlightMode
+                    ? '航班編號（輸入後點「自動帶入」可自動填寫起降機場與時間）'
+                    : '車次 / 班次名稱 / 車牌備註'}
+                </label>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={currentLegObj.flightNo}
+                  onChange={(e) => {
+                    onUpdateFlightMeta(activeSlot.leg, { flightNo: e.target.value });
+                    setLookupFeedback(null);
+                  }}
+                  onKeyDown={async (e) => {
+                    if (e.key === 'Enter' && isFlightMode) {
+                      e.preventDefault();
+                      setIsLookingUpFlight(true);
+                      setPairedReturnOffer(null);
+                      try {
+                        const res = await lookupFlightByNumber(
+                          currentLegObj.flightNo,
+                          activeSlot.leg,
+                          currentLegObj,
+                          startDate,
+                          endDate
+                        );
+                        onUpdateFlightMeta(activeSlot.leg, res.updates);
+                        if (res.airlineLabel) {
+                          onUpdateAirlineLabel(res.airlineLabel);
+                        }
+                        setLookupFeedback(res.message);
+                        if (res.pairedReturnFlightNo && res.pairedReturnUpdates) {
+                          setPairedReturnOffer({
+                            flightNo: res.pairedReturnFlightNo,
+                            updates: res.pairedReturnUpdates,
+                          });
+                        }
+                      } finally {
+                        setIsLookingUpFlight(false);
+                      }
+                    }
+                  }}
+                  placeholder={modeMeta.numberPlaceholder}
+                  className="flex-1 min-w-0 px-3 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-extrabold text-[#14241D]"
+                />
+                {isFlightMode && (
                   <button
                     type="button"
-                    onClick={() => {
-                      onUpdateFlightMeta('inbound', pairedReturnOffer.updates);
-                      setLookupFeedback(
-                        `✅ 已同步帶入回程航班 ${pairedReturnOffer.flightNo} 與回程日期！`
-                      );
+                    disabled={isLookingUpFlight}
+                    onClick={async () => {
+                      setIsLookingUpFlight(true);
                       setPairedReturnOffer(null);
+                      try {
+                        const res = await lookupFlightByNumber(
+                          currentLegObj.flightNo,
+                          activeSlot.leg,
+                          currentLegObj,
+                          startDate,
+                          endDate
+                        );
+                        onUpdateFlightMeta(activeSlot.leg, res.updates);
+                        if (res.airlineLabel) {
+                          onUpdateAirlineLabel(res.airlineLabel);
+                        }
+                        setLookupFeedback(res.message);
+                        if (res.pairedReturnFlightNo && res.pairedReturnUpdates) {
+                          setPairedReturnOffer({
+                            flightNo: res.pairedReturnFlightNo,
+                            updates: res.pairedReturnUpdates,
+                          });
+                        }
+                      } finally {
+                        setIsLookingUpFlight(false);
+                      }
                     }}
-                    className="px-2 py-0.5 rounded-lg bg-[#1A5D42] text-white text-[10.5px] font-extrabold hover:bg-[#134631] transition shrink-0"
+                    className="px-3 py-1.5 rounded-xl bg-[#E3F2EA] hover:bg-[#CFE8DB] text-[#165C3E] text-xs font-extrabold flex items-center gap-1.5 shrink-0 transition disabled:opacity-50"
                   >
-                    ✨ 同步帶入回程 ({pairedReturnOffer.flightNo})
+                    {isLookingUpFlight ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <span>🔍</span>
+                    )}
+                    <span>{isLookingUpFlight ? '查詢中...' : '自動帶入'}</span>
                   </button>
                 )}
               </div>
+
+              {lookupFeedback && (
+                <div className="mt-1.5 px-2.5 py-1.5 rounded-xl bg-[#EAF4EF] border border-[#CFE3D8] text-[11px] font-bold text-[#1A5D42] flex items-center justify-between gap-2 flex-wrap">
+                  <span>{lookupFeedback}</span>
+                  {pairedReturnOffer && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onUpdateFlightMeta('inbound', pairedReturnOffer.updates);
+                        setLookupFeedback(
+                          `✅ 已同步帶入回程航班 ${pairedReturnOffer.flightNo} 與回程日期！`
+                        );
+                        setPairedReturnOffer(null);
+                      }}
+                      className="px-2 py-0.5 rounded-lg bg-[#1A5D42] text-white text-[10.5px] font-extrabold hover:bg-[#134631] transition shrink-0"
+                    >
+                      ✨ 同步帶入回程 ({pairedReturnOffer.flightNo})
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 出發與抵達時間（依模式自動計算真實車程／航程） */}
+            <div className="grid grid-cols-2 gap-2.5">
+              <div className="min-w-0">
+                <label className="text-[10.5px] font-bold text-[#5A7066] block mb-0.5">
+                  {modeMeta.departTimeLabel} ({currentLegObj.departCode})
+                </label>
+                <input
+                  type="time"
+                  value={currentLegObj.departTime}
+                  onChange={(e) => {
+                    const nextDepart = e.target.value;
+                    const nextDuration = isFlightMode
+                      ? calculateFlightDuration(
+                          nextDepart,
+                          currentLegObj.arriveTime,
+                          currentLegObj.departCode,
+                          currentLegObj.arriveCode
+                        )
+                      : calculateLandTravelDuration(
+                          nextDepart,
+                          currentLegObj.arriveTime,
+                          activeMode
+                        );
+                    const dateLabel = formatFlightDateLabel(
+                      activeSlot.leg === 'outbound' ? startDate : endDate,
+                      activeSlot.leg
+                    );
+                    onUpdateFlightMeta(activeSlot.leg, {
+                      departTime: nextDepart,
+                      duration: nextDuration,
+                      ...(dateLabel ? { dateLabel } : {}),
+                    });
+                  }}
+                  className="w-full max-w-full min-w-0 block px-2.5 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold"
+                />
+              </div>
+              <div className="min-w-0">
+                <label className="text-[10.5px] font-bold text-[#5A7066] block mb-0.5">
+                  {modeMeta.arriveTimeLabel} ({currentLegObj.arriveCode})
+                </label>
+                <input
+                  type="time"
+                  value={currentLegObj.arriveTime}
+                  onChange={(e) => {
+                    const nextArrive = e.target.value;
+                    const nextDuration = isFlightMode
+                      ? calculateFlightDuration(
+                          currentLegObj.departTime,
+                          nextArrive,
+                          currentLegObj.departCode,
+                          currentLegObj.arriveCode
+                        )
+                      : calculateLandTravelDuration(
+                          currentLegObj.departTime,
+                          nextArrive,
+                          activeMode
+                        );
+                    const dateLabel = formatFlightDateLabel(
+                      activeSlot.leg === 'outbound' ? startDate : endDate,
+                      activeSlot.leg
+                    );
+                    onUpdateFlightMeta(activeSlot.leg, {
+                      arriveTime: nextArrive,
+                      duration: nextDuration,
+                      ...(dateLabel ? { dateLabel } : {}),
+                    });
+                  }}
+                  className="w-full max-w-full min-w-0 block px-2.5 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold"
+                />
+              </div>
+            </div>
+
+            {!isFlightMode && (
+              <div>
+                <label className="text-[10.5px] font-bold text-[#5A7066] block mb-0.5">
+                  備註 / 通關與座位提示
+                </label>
+                <input
+                  type="text"
+                  value={currentLegObj.perkLabel}
+                  onChange={(e) =>
+                    onUpdateFlightMeta(activeSlot.leg, { perkLabel: e.target.value })
+                  }
+                  placeholder="例如：HK$65 · 過關後搭專車進珠海市區"
+                  className="w-full px-3 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold text-[#14241D]"
+                />
+              </div>
             )}
           </div>
+        </div>
 
-          {/* 出發與抵達時間（依模式自動計算真實車程／航程） */}
-          <div className="grid grid-cols-2 gap-2.5">
-            <div className="min-w-0">
-              <label className="text-[10.5px] font-bold text-[#5A7066] block mb-0.5">
-                {modeMeta.departTimeLabel} ({currentLegObj.departCode})
-              </label>
-              <input
-                type="time"
-                value={currentLegObj.departTime}
-                onChange={(e) => {
-                  const nextDepart = e.target.value;
-                  const nextDuration = isFlightMode
-                    ? calculateFlightDuration(
-                        nextDepart,
-                        currentLegObj.arriveTime,
-                        currentLegObj.departCode,
-                        currentLegObj.arriveCode
-                      )
-                    : calculateLandTravelDuration(
-                        nextDepart,
-                        currentLegObj.arriveTime,
-                        activeMode
-                      );
-                  const dateLabel = formatFlightDateLabel(
-                    activeSlot.leg === 'outbound' ? startDate : endDate,
-                    activeSlot.leg
-                  );
-                  onUpdateFlightMeta(activeSlot.leg, {
-                    departTime: nextDepart,
-                    duration: nextDuration,
-                    ...(dateLabel ? { dateLabel } : {}),
-                  });
-                }}
-                className="w-full max-w-full min-w-0 block px-2.5 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold"
-              />
-            </div>
-            <div className="min-w-0">
-              <label className="text-[10.5px] font-bold text-[#5A7066] block mb-0.5">
-                {modeMeta.arriveTimeLabel} ({currentLegObj.arriveCode})
-              </label>
-              <input
-                type="time"
-                value={currentLegObj.arriveTime}
-                onChange={(e) => {
-                  const nextArrive = e.target.value;
-                  const nextDuration = isFlightMode
-                    ? calculateFlightDuration(
-                        currentLegObj.departTime,
-                        nextArrive,
-                        currentLegObj.departCode,
-                        currentLegObj.arriveCode
-                      )
-                    : calculateLandTravelDuration(
-                        currentLegObj.departTime,
-                        nextArrive,
-                        activeMode
-                      );
-                  const dateLabel = formatFlightDateLabel(
-                    activeSlot.leg === 'outbound' ? startDate : endDate,
-                    activeSlot.leg
-                  );
-                  onUpdateFlightMeta(activeSlot.leg, {
-                    arriveTime: nextArrive,
-                    duration: nextDuration,
-                    ...(dateLabel ? { dateLabel } : {}),
-                  });
-                }}
-                className="w-full max-w-full min-w-0 block px-2.5 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold"
-              />
-            </div>
-          </div>
-
-          {!isFlightMode && (
-            <div>
-              <label className="text-[10.5px] font-bold text-[#5A7066] block mb-0.5">
-                備註 / 通關與座位提示
-              </label>
-              <input
-                type="text"
-                value={currentLegObj.perkLabel}
-                onChange={(e) =>
-                  onUpdateFlightMeta(activeSlot.leg, { perkLabel: e.target.value })
-                }
-                placeholder="例如：HK$65 · 過關後搭專車進珠海市區"
-                className="w-full px-3 py-1.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold text-[#14241D]"
-              />
-            </div>
-          )}
-
+        {/* 底部固定操作欄（始終完整可見） */}
+        <div className="px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-white border-t border-[#DCEAE2] shrink-0">
           <button
             type="button"
             onClick={onClose}
-            className="w-full py-2.5 rounded-2xl bg-[#1A5D42] hover:bg-[#134631] text-white font-extrabold text-sm transition"
+            className="w-full py-2.5 rounded-2xl bg-[#1A5D42] hover:bg-[#134631] text-white font-extrabold text-sm transition shadow-xs"
           >
             {isFlightMode ? '完成機場與航班設定' : `完成${modeMeta.label}設定`}
           </button>
