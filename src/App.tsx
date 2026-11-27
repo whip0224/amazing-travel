@@ -64,10 +64,33 @@ import {
   type ExpenseItem,
   type ExpenseCategoryKey,
   type FlightLeg,
+  type StayInfo,
+  type StickerItem,
+  type TransportMode,
 } from './types/tabi';
+import { DEFAULT_STICKERS } from './utils/defaultStickers';
+import {
+  addDaysIso,
+  findStayForDate,
+  formatShortMd,
+  formatStayCheckLabel,
+  getStayNights,
+  normalizeStayItem,
+  normalizeStaysList,
+  sortStaysByDate,
+} from './utils/stayHelpers';
+import {
+  TRANSPORT_MODE_META,
+  QUICK_LAND_ROUTES,
+  buildPresetLegsWithDates,
+  getLegTransportMode,
+  getTripTransportMode,
+  type QuickLandRoutePreset,
+} from './utils/landTransportPresets';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import { IntegrationGuideModal } from './components/IntegrationGuideModal';
 import { AirportSearchModal, type AirportTargetSlot } from './components/AirportSearchModal';
+import { TripSummaryModal } from './components/TripSummaryModal';
 import { formatFlightDateLabel } from './utils/flightLookup';
 import {
   findDestinationPhoto,
@@ -118,16 +141,34 @@ const firebaseConfig = {
 
 let auth: ReturnType<typeof getAuth> | null = null;
 let db: ReturnType<typeof getFirestore> | null = null;
-try {
-  const app = initializeApp(firebaseConfig);
-  auth = getAuth(app);
-  db = getFirestore(app);
-} catch {
-  // Offline fallback when Firebase key is not configured
+if (import.meta.env.VITE_FIREBASE_API_KEY) {
+  try {
+    const app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+  } catch {
+    // Offline fallback when Firebase key is not configured
+  }
 }
 
 const STORAGE_KEY_V2 = 'tabi_pwa_state_v2';
 const LEGACY_STORAGE_KEY = 'at_local_data_final_v1';
+const STICKERS_STORAGE_KEY = 'tabi_stickers_v1';
+
+const loadInitialStickers = (): StickerItem[] => {
+  try {
+    const raw = localStorage.getItem(STICKERS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch {
+    // ignore storage read error
+  }
+  return DEFAULT_STICKERS;
+};
 
 // 讀取 LocalStorage 初始資料 (確保刪除預設景點、清空或編輯後重開 App 100% 保留最後狀態)
 const loadInitialTabiState = (): TabiState => {
@@ -165,6 +206,22 @@ const loadInitialTabiState = (): TabiState => {
       if (rawStay.tag1 === 'River View') rawStay.tag1 = DEFAULT_TABI_STATE.stay.tag1;
       if (rawStay.tag2 === 'Free Breakfast') rawStay.tag2 = DEFAULT_TABI_STATE.stay.tag2;
 
+      const rawStays: StayInfo[] =
+        Array.isArray(parsed.stays) && parsed.stays.length > 0
+          ? parsed.stays.map((item: Partial<StayInfo>, idx: number) => {
+              const normalized = normalizeStayItem(
+                item,
+                idx,
+                idx === 0 ? rawTrip.startDate : undefined,
+                idx === 0 ? rawTrip.endDate : undefined
+              );
+              if (normalized.insiderScoop?.includes('Front desk has secret matcha')) {
+                normalized.insiderScoop = DEFAULT_TABI_STATE.stay.insiderScoop;
+              }
+              return normalized;
+            })
+          : [normalizeStayItem(rawStay, 0, rawTrip.startDate, rawTrip.endDate)];
+
       const rawActivities: PlanActivity[] = Array.isArray(parsed.activities)
         ? parsed.activities.map((a: PlanActivity) => {
             if (a.id === 'act-1' && a.note?.includes('Don\'t skip the fresh tamagoyaki')) {
@@ -199,7 +256,8 @@ const loadInitialTabiState = (): TabiState => {
         },
         outbound: { ...DEFAULT_TABI_STATE.outbound, ...(parsed.outbound || {}) },
         inbound: { ...DEFAULT_TABI_STATE.inbound, ...(parsed.inbound || {}) },
-        stay: rawStay,
+        stay: rawStays[0] || rawStay,
+        stays: rawStays,
         // 關鍵修正：只要 parsed.destinations 為陣列（即使使用者刪光所有預設目的地變為 []），也必須忠實保留，不再回退至 DEFAULT_TABI_STATE
         destinations: Array.isArray(parsed.destinations)
           ? parsed.destinations
@@ -401,6 +459,8 @@ export default function App() {
 
   // 其他 Modals 狀態
   const [showStayModal, setShowStayModal] = useState(false);
+  const [editingStayIndex, setEditingStayIndex] = useState(0);
+  const [stayPreviewOverrideIndex, setStayPreviewOverrideIndex] = useState<number | null>(null);
   const [showTripModal, setShowTripModal] = useState(false);
   const [showBoardingModal, setShowBoardingModal] = useState(false);
   const [showBaggageModal, setShowBaggageModal] = useState(false);
@@ -414,7 +474,17 @@ export default function App() {
   const [showCloudShareModal, setShowCloudShareModal] = useState(false);
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [showBudgetEditModal, setShowBudgetEditModal] = useState(false);
+  const [showTripSummaryModal, setShowTripSummaryModal] = useState(false);
+  const [stickers, setStickers] = useState<StickerItem[]>(loadInitialStickers);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STICKERS_STORAGE_KEY, JSON.stringify(stickers));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [stickers]);
 
   // --- 📋 目的地清單 (Destination Pool) 與排程狀態 ---
   const [manualDestInput, setManualDestInput] = useState('');
@@ -760,6 +830,26 @@ export default function App() {
     }
     return arr;
   }, [state.trip.startDate, state.trip.endDate]);
+
+  // --- 🏨 多間住宿（依日期自動匹配不同酒店） ---
+  const staysList = useMemo(
+    () => normalizeStaysList(state),
+    [state.stay, state.stays, state.trip.startDate, state.trip.endDate]
+  );
+
+  const activeStayDay = tripDays[selectedDay] || tripDays[0];
+  const matchedStayByDate = useMemo(
+    () => findStayForDate(staysList, activeStayDay?.iso || state.trip.startDate),
+    [staysList, activeStayDay?.iso, state.trip.startDate]
+  );
+
+  const displayedStayIndex =
+    stayPreviewOverrideIndex !== null && stayPreviewOverrideIndex < staysList.length
+      ? stayPreviewOverrideIndex
+      : matchedStayByDate.index;
+  const displayedStay = staysList[displayedStayIndex] || staysList[0];
+  const displayedStayStatus =
+    stayPreviewOverrideIndex !== null ? 'staying' : matchedStayByDate.status;
 
   // 根據出發日期與回程日期，自動計算生成「卡片日期顯示文字」（例如 Apr 12–17, 2027 · 5 Nights）
   const formatTripDateRangeLabel = (startStr: string, endStr: string): string => {
@@ -1166,18 +1256,22 @@ export default function App() {
   useEffect(() => {
     if (!currentUser || !db || currentMode !== 'shared' || !currentShareId) return;
     const path = doc(db, 'artifacts', 'amazing-travel-v1', 'public', 'data', 'shares', currentShareId);
-    const unsub = onSnapshot(path, (snap) => {
-      if (snap.metadata.hasPendingWrites) return;
-      if (snap.exists()) {
-        const data = snap.data() as Partial<TabiState>;
-        if (data.trip && data.expenses) {
-          setState((prev) => ({
-            ...prev,
-            ...data,
-          }));
+    const unsub = onSnapshot(
+      path,
+      (snap) => {
+        if (snap.metadata.hasPendingWrites) return;
+        if (snap.exists()) {
+          const data = snap.data() as Partial<TabiState>;
+          if (data.trip && data.expenses) {
+            setState((prev) => ({
+              ...prev,
+              ...data,
+            }));
+          }
         }
-      }
-    });
+      },
+      () => setCloudOnline(false)
+    );
     return () => unsub();
   }, [currentUser, currentMode, currentShareId]);
 
@@ -1440,13 +1534,107 @@ export default function App() {
     }
   };
 
+  // --- 🏨 多間飯店增刪改輔助函式（同步 stays 陣列與主 stay 欄位） ---
+  const updateStayAt = (
+    index: number,
+    updater: (current: StayInfo) => StayInfo,
+    sortAfter = false
+  ) => {
+    setState((prev) => {
+      const currentList = normalizeStaysList(prev);
+      if (!currentList[index]) return prev;
+      const nextList = currentList.map((item, i) => (i === index ? updater(item) : item));
+      const finalList = sortAfter ? sortStaysByDate(nextList) : nextList;
+      return {
+        ...prev,
+        stays: finalList,
+        stay: finalList[0] || prev.stay,
+      };
+    });
+  };
+
+  const handleAddNewStay = (openModal = true) => {
+    const currentList = staysList;
+    const lastStay = currentList[currentList.length - 1];
+    const defaultInDate = lastStay?.checkOutDate || state.trip.startDate || '';
+    let defaultOutDate =
+      state.trip.endDate && defaultInDate && state.trip.endDate > defaultInDate
+        ? state.trip.endDate
+        : defaultInDate
+        ? addDaysIso(defaultInDate, 1)
+        : '';
+    if (defaultInDate && defaultOutDate && defaultOutDate <= defaultInDate) {
+      defaultOutDate = addDaysIso(defaultInDate, 1);
+    }
+    const newStay = normalizeStayItem(
+      {
+        id: `stay-${Date.now()}`,
+        stars: 4,
+        category: 'Hotel',
+        hotelName: '',
+        subTitle: '標準雙人房 · Standard Room',
+        tag1: '',
+        tag2: '',
+        checkInDate: defaultInDate,
+        checkOutDate: defaultOutDate,
+        checkInTime: '15:00',
+        checkOutTime: '11:00',
+        address: '',
+        insiderScoop: '',
+        paidStatus: 'Paid & Booked',
+        photoUrl: '/assets/tabi/hotel_kyoto.png',
+      },
+      currentList.length
+    );
+    const nextList = [...currentList, newStay];
+    const newIndex = nextList.length - 1;
+    setState((prev) => ({
+      ...prev,
+      stays: nextList,
+      stay: nextList[0] || prev.stay,
+    }));
+    setEditingStayIndex(newIndex);
+    setStayPreviewOverrideIndex(newIndex);
+    setHotelCandidates([]);
+    if (openModal) {
+      setShowStayModal(true);
+    }
+    showToast(`🏨 已新增第 ${newIndex + 1} 間住宿，請設定飯店與 Check-in/out 日期`);
+  };
+
+  const handleRemoveStayAt = (index: number) => {
+    if (staysList.length <= 1) {
+      showToast('至少需保留 1 間住宿資訊');
+      return;
+    }
+    const removedName = staysList[index]?.hotelName || `第 ${index + 1} 間住宿`;
+    const nextList = staysList.filter((_, i) => i !== index);
+    setState((prev) => ({
+      ...prev,
+      stays: nextList,
+      stay: nextList[0] || prev.stay,
+    }));
+    setEditingStayIndex((prevIdx) => Math.max(0, Math.min(prevIdx, nextList.length - 1)));
+    setStayPreviewOverrideIndex(null);
+    setHotelCandidates([]);
+    showToast(`🗑️ 已移除「${removedName}」`);
+  };
+
   // --- 🏨 飯店／住宿智能換圖功能（根據飯店名稱、地址與目的地自動尋找匹配的飯店外觀或客房圖片） ---
   const handleAutoFindStayPhoto = async (
     hotelNameOverride?: string,
-    addressOverride?: string
+    addressOverride?: string,
+    targetIndexOverride?: number
   ) => {
-    const queryName = (hotelNameOverride ?? state.stay.hotelName).trim();
-    const queryAddr = (addressOverride ?? state.stay.address).trim();
+    const idx =
+      typeof targetIndexOverride === 'number'
+        ? targetIndexOverride
+        : showStayModal
+        ? Math.min(editingStayIndex, staysList.length - 1)
+        : displayedStayIndex;
+    const targetStay = staysList[idx] || state.stay;
+    const queryName = (hotelNameOverride ?? targetStay.hotelName).trim();
+    const queryAddr = (addressOverride ?? targetStay.address).trim();
     if (!queryName || isSearchingStayPhoto) return;
     setIsSearchingStayPhoto(true);
     try {
@@ -1454,14 +1642,11 @@ export default function App() {
         queryName,
         queryAddr,
         state.trip.destinationTitle,
-        state.stay.photoUrl
+        targetStay.photoUrl
       );
-      setState((prev) => ({
-        ...prev,
-        stay: {
-          ...prev.stay,
-          photoUrl: nextPhotoUrl,
-        },
+      updateStayAt(idx, (s) => ({
+        ...s,
+        photoUrl: nextPhotoUrl,
       }));
       showToast(`🖼️ 已為「${queryName}」智能換上合適飯店圖片！`);
     } catch {
@@ -1473,26 +1658,35 @@ export default function App() {
 
   // 若 LocalStorage 舊快取中存到了先前維基百科全文搜尋誤抓的韓團/無關照片，載入時自動替換為正確飯店實景圖
   useEffect(() => {
-    if (isInvalidCachedHotelPhoto(state.stay.photoUrl)) {
-      findHotelPhoto(
-        state.stay.hotelName,
-        state.stay.address,
-        state.trip.destinationTitle
-      ).then((fixedUrl) => {
-        setState((prev) => ({
-          ...prev,
-          stay: {
-            ...prev.stay,
+    staysList.forEach((item, idx) => {
+      if (item.hotelName && isInvalidCachedHotelPhoto(item.photoUrl)) {
+        findHotelPhoto(
+          item.hotelName,
+          item.address,
+          state.trip.destinationTitle
+        ).then((fixedUrl) => {
+          updateStayAt(idx, (s) => ({
+            ...s,
             photoUrl: fixedUrl,
-          },
-        }));
-      });
-    }
-  }, [state.stay.photoUrl, state.stay.hotelName, state.stay.address, state.trip.destinationTitle]);
+          }));
+        });
+      }
+    });
+  }, [staysList, state.trip.destinationTitle]);
 
   // --- 🏨 輸入飯店名稱後自動查詢地址（單一結果直接填入並智能配圖，多個分館跳出選擇卡片） ---
-  const handleSearchHotelAddress = async (hotelQueryOverride?: string) => {
-    const query = (hotelQueryOverride ?? state.stay.hotelName).trim();
+  const handleSearchHotelAddress = async (
+    hotelQueryOverride?: string,
+    targetIndexOverride?: number
+  ) => {
+    const idx =
+      typeof targetIndexOverride === 'number'
+        ? targetIndexOverride
+        : showStayModal
+        ? Math.min(editingStayIndex, staysList.length - 1)
+        : displayedStayIndex;
+    const targetStay = staysList[idx] || state.stay;
+    const query = (hotelQueryOverride ?? targetStay.hotelName).trim();
     if (!query || query.length < 2) {
       showToast('⚠️ 請先輸入飯店名稱（至少 2 個字）');
       return;
@@ -1502,25 +1696,22 @@ export default function App() {
       const results = await searchHotelCandidates(query, state.trip.destinationTitle);
       if (results.length === 1) {
         const matched = results[0];
-        const finalHotelName = matched.name || state.stay.hotelName;
-        setState((prev) => ({
-          ...prev,
-          stay: {
-            ...prev.stay,
-            hotelName: finalHotelName,
-            address: matched.address,
-            subTitle: matched.branchNote || prev.stay.subTitle,
-          },
+        const finalHotelName = matched.name || targetStay.hotelName;
+        updateStayAt(idx, (s) => ({
+          ...s,
+          hotelName: finalHotelName,
+          address: matched.address,
+          subTitle: matched.branchNote || s.subTitle,
         }));
         setHotelCandidates([]);
         showToast(`✅ 已自動填寫「${finalHotelName}」的地址並配對飯店圖片！`);
-        handleAutoFindStayPhoto(finalHotelName, matched.address);
+        handleAutoFindStayPhoto(finalHotelName, matched.address, idx);
       } else if (results.length > 1) {
         setHotelCandidates(results);
         showToast(`🏨 發現 ${results.length} 個相關分館/地址，請點選下方卡片套用！`);
       } else {
         setHotelCandidates([]);
-        showToast('ℹ️ 找不到相符的飯店地址，請嘗試加上城市名稱（如：APA 京都）或手動輸入');
+        showToast('ℹ️ 找不到相符的飯店地址，請嘗試加上城市名稱（如：珠海、橫琴、京都）或手動輸入');
       }
     } catch {
       setHotelCandidates([]);
@@ -1572,6 +1763,51 @@ export default function App() {
       ...prev,
       [leg]: { ...prev[leg], ...updates },
     }));
+  };
+
+  const handleSwitchRoundTripTransportMode = (mode: TransportMode) => {
+    const meta = TRANSPORT_MODE_META[mode];
+    setState((prev) => {
+      const prevMode = getTripTransportMode(prev.outbound, prev.inbound);
+      const shouldUpdateLabel =
+        prevMode !== mode &&
+        (!prev.trip.airlineLabel ||
+          Object.values(TRANSPORT_MODE_META).some(
+            (m) => m.defaultOperatorLabel === prev.trip.airlineLabel
+          ) ||
+          prev.trip.airlineLabel === 'ANA · Economy');
+      return {
+        ...prev,
+        trip: {
+          ...prev.trip,
+          ...(shouldUpdateLabel ? { airlineLabel: meta.defaultOperatorLabel } : {}),
+        },
+        outbound: { ...prev.outbound, transportMode: mode },
+        inbound: { ...prev.inbound, transportMode: mode },
+      };
+    });
+    showToast(`${meta.icon} 已切換來回交通為「${meta.label}」`);
+  };
+
+  const handleApplyLandPreset = (preset: QuickLandRoutePreset) => {
+    setState((prev) => {
+      const { outbound, inbound } = buildPresetLegsWithDates(
+        preset,
+        prev.trip.startDate,
+        prev.trip.endDate
+      );
+      return {
+        ...prev,
+        trip: {
+          ...prev.trip,
+          airlineLabel: preset.airlineLabel,
+          ...(preset.baggageLabel ? { baggageLabel: preset.baggageLabel } : {}),
+        },
+        outbound,
+        inbound,
+      };
+    });
+    showToast(`✅ 已套用「${preset.title}」來回交通設定`);
   };
 
   // --- 📍 目的地清單：手動輸入新增地點 (支援逗號分隔多個地點 & 自動抓 Google Places 資訊) ---
@@ -1798,18 +2034,26 @@ export default function App() {
         if (Array.isArray(candidateArray)) {
           // 若同時帶有舊版 inputs (startDate, endDate, hotelName) 也一併同步
           if (parsed.inputs && typeof parsed.inputs === 'object') {
-            setState((prev) => ({
-              ...prev,
-              trip: {
-                ...prev.trip,
-                startDate: parsed.inputs.startDate || prev.trip.startDate,
-                endDate: parsed.inputs.endDate || prev.trip.endDate,
-              },
-              stay: {
-                ...prev.stay,
-                hotelName: parsed.inputs.hotelName || prev.stay.hotelName,
-              },
-            }));
+            setState((prev) => {
+              const currentList = normalizeStaysList(prev);
+              const nextFirst = {
+                ...currentList[0],
+                hotelName: parsed.inputs.hotelName || currentList[0].hotelName,
+                ...(parsed.inputs.startDate ? { checkInDate: parsed.inputs.startDate } : {}),
+                ...(parsed.inputs.endDate ? { checkOutDate: parsed.inputs.endDate } : {}),
+              };
+              const nextStays = [nextFirst, ...currentList.slice(1)];
+              return {
+                ...prev,
+                trip: {
+                  ...prev.trip,
+                  startDate: parsed.inputs.startDate || prev.trip.startDate,
+                  endDate: parsed.inputs.endDate || prev.trip.endDate,
+                },
+                stays: nextStays,
+                stay: nextFirst,
+              };
+            });
           }
           return parseAndImportPlacesArray(candidateArray);
         }
@@ -3310,12 +3554,20 @@ export default function App() {
               {renderPageHeader('TRIPS')}
 
               <div className="px-5 space-y-4">
-                {/* 頂部「📥 匯入 Location 資料」&「共享」按鈕列 (已依要求移除 Ready to wander!) */}
-                <div className="flex items-center justify-end gap-1.5 pt-1" data-no-flip="true">
+                {/* 頂部「一鍵總結」、「📥 匯入 Location 資料」&「共享」按鈕列 */}
+                <div className="flex items-center justify-end gap-1.5 pt-1 flex-wrap" data-no-flip="true">
+                  <button
+                    type="button"
+                    onClick={() => setShowTripSummaryModal(true)}
+                    className="px-3 py-2 rounded-full bg-[#1A5D42] hover:bg-[#144832] text-white text-[12px] font-extrabold flex items-center gap-1.5 shadow-xs transition whitespace-nowrap"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>一鍵總結</span>
+                  </button>
                   <button
                     type="button"
                     onClick={handleImportFromClipboard}
-                    className="px-3 py-2 rounded-full bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12px] font-extrabold flex items-center gap-1 shadow-xs transition"
+                    className="px-3 py-2 rounded-full bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12px] font-extrabold flex items-center gap-1 shadow-xs transition whitespace-nowrap"
                   >
                     <span>📥</span>
                     <span>匯入 Location 資料</span>
@@ -3443,257 +3695,500 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* ✈️ Round-trip flights (升級為點擊觸發「包含即時搜尋過濾與航廈資訊的國際機場 Modal」) */}
-                <div className="pt-1">
-                  <div className="flex items-center justify-between mb-2.5" data-no-flip="true">
-                    <div className="flex items-center gap-2.5">
-                      <span className="w-9 h-9 rounded-full bg-[#FCE1D6] text-[#C84A23] flex items-center justify-center shadow-2xs">
-                        <Send className="w-4 h-4 -rotate-12" />
-                      </span>
-                      <h2 className="text-[19px] font-extrabold text-[#162921] tracking-tight">
-                        Round-trip flights
-                      </h2>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => openAirportPicker('outbound', 'depart')}
-                      className="px-3 py-1 rounded-full bg-[#E1EFE8] hover:bg-[#d2e7dc] text-[#2F5243] text-[12px] font-bold flex items-center gap-1 transition"
-                    >
-                      <span>{state.trip.airlineLabel}</span>
-                      <Edit3 className="w-3 h-3 ml-0.5" />
-                    </button>
-                  </div>
-
-                  <div className="bg-white rounded-[28px] p-4 shadow-sm border border-[#E2EFE8] space-y-4">
-                    {/* OUTBOUND 去程 */}
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-[11.5px] font-extrabold tracking-wider text-[#1C6748] uppercase">
-                          {state.outbound.dateLabel}
-                        </span>
+                {/* ✈️/🚄/🚌/🚗/⛴️ Round-trip Transport (支援飛機航班與高鐵、跨境巴士/金巴、自駕、客輪切換) */}
+                {(() => {
+                  const tripMode = getTripTransportMode(state.outbound, state.inbound);
+                  const tripModeMeta = TRANSPORT_MODE_META[tripMode];
+                  const outboundModeMeta =
+                    TRANSPORT_MODE_META[getLegTransportMode(state.outbound)];
+                  const inboundModeMeta =
+                    TRANSPORT_MODE_META[getLegTransportMode(state.inbound)];
+                  const isFlightTrip = tripMode === 'flight';
+                  return (
+                    <div className="pt-1">
+                      <div className="flex items-center justify-between mb-2.5 gap-2" data-no-flip="true">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="w-9 h-9 rounded-full bg-[#FCE1D6] text-[#C84A23] flex items-center justify-center shadow-2xs shrink-0 text-base">
+                            {isFlightTrip ? (
+                              <Send className="w-4 h-4 -rotate-12" />
+                            ) : (
+                              <span>{tripModeMeta.icon}</span>
+                            )}
+                          </span>
+                          <div className="min-w-0">
+                            <h2 className="text-[18px] font-extrabold text-[#162921] tracking-tight truncate">
+                              {tripModeMeta.enHeading}
+                            </h2>
+                            {!isFlightTrip && (
+                              <div className="text-[11px] font-bold text-[#1A5D42] truncate">
+                                來回陸路 / 海陸交通 · {tripModeMeta.label}
+                              </div>
+                            )}
+                          </div>
+                        </div>
                         <button
                           type="button"
                           onClick={() => openAirportPicker('outbound', 'depart')}
-                          data-no-flip="true"
-                          className="px-2.5 py-0.5 rounded-full bg-[#D8F3E5] text-[#186043] text-[11px] font-extrabold hover:brightness-95 transition"
+                          className="px-3 py-1 rounded-full bg-[#E1EFE8] hover:bg-[#d2e7dc] text-[#2F5243] text-[11.5px] font-bold flex items-center gap-1 transition max-w-[170px] shrink-0"
                         >
-                          {state.outbound.flightNo}
+                          <span className="truncate">{state.trip.airlineLabel}</span>
+                          <Edit3 className="w-3 h-3 ml-0.5 shrink-0" />
                         </button>
                       </div>
 
-                      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-                        {/* 去程出發時間與機場 (點擊開啟搜尋過濾 Modal) */}
-                        <div data-no-flip="true">
-                          <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
-                            {state.outbound.departTime}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => openAirportPicker('outbound', 'depart')}
-                            className="mt-0.5 inline-flex items-center gap-1 text-[16px] font-extrabold text-[#B8431F] hover:bg-[#FCE1D6]/50 px-1.5 py-0.5 -ml-1.5 rounded-lg transition"
-                          >
-                            <span>{state.outbound.departCode}</span>
-                            {state.outbound.departTerminal && (
-                              <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#FCE1D6] text-[#9E3516] font-extrabold">
-                                {state.outbound.departTerminal}
-                              </span>
-                            )}
-                            <span className="text-[10px]">🔍</span>
-                          </button>
-                          <div className="text-[12px] text-[#647A70] font-medium truncate">
-                            {state.outbound.departCity}
-                          </div>
-                        </div>
-
-                        {/* 航程線 */}
-                        <div className="flex flex-col items-center px-2">
-                          <span className="text-[11px] font-bold text-[#5E4037] mb-1">
-                            {state.outbound.duration}
-                          </span>
-                          <div className="w-28 flex items-center">
-                            <div className="h-[2px] flex-1 bg-[#74C6A3]" />
-                            <span className="mx-1 text-[#1E6F4E] text-xs font-bold">▷</span>
-                            <div className="h-[2px] flex-1 bg-[#74C6A3]" />
-                          </div>
-                          <span className="text-[11.5px] font-bold text-[#22694B] mt-1">
-                            {state.outbound.perkLabel}
-                          </span>
-                        </div>
-
-                        {/* 去程抵達時間與機場 (點擊開啟搜尋過濾 Modal) */}
-                        <div className="text-right" data-no-flip="true">
-                          <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
-                            {state.outbound.arriveTime}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => openAirportPicker('outbound', 'arrive')}
-                            className="mt-0.5 inline-flex items-center justify-end gap-1 text-[16px] font-extrabold text-[#B8431F] hover:bg-[#FCE1D6]/50 px-1.5 py-0.5 -mr-1.5 rounded-lg transition"
-                          >
-                            <span>{state.outbound.arriveCode}</span>
-                            {state.outbound.arriveTerminal && (
-                              <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#FCE1D6] text-[#9E3516] font-extrabold">
-                                {state.outbound.arriveTerminal}
-                              </span>
-                            )}
-                            <span className="text-[10px]">🔍</span>
-                          </button>
-                          <div className="text-[12px] text-[#647A70] font-medium truncate">
-                            {state.outbound.arriveCity}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="border-t border-dashed border-[#DCE8E2]" />
-
-                    {/* RETURN 回程 */}
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-[11.5px] font-extrabold tracking-wider text-[#1C5D99] uppercase">
-                          {state.inbound.dateLabel}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => openAirportPicker('inbound', 'depart')}
+                      <div className="bg-white rounded-[28px] p-4 shadow-sm border border-[#E2EFE8] space-y-3.5">
+                        {/* 交通工具快速切換分段列 (飛機 / 高鐵 / 巴士 / 自駕 / 船班) */}
+                        <div
                           data-no-flip="true"
-                          className="px-2.5 py-0.5 rounded-full bg-[#DCEBFA] text-[#1B5791] text-[11px] font-extrabold hover:brightness-95 transition"
+                          className="grid grid-cols-5 gap-1 p-1 rounded-2xl bg-[#EDF6F1] border border-[#DCEAE2]"
                         >
-                          {state.inbound.flightNo}
-                        </button>
-                      </div>
+                          {(['flight', 'hsr', 'bus', 'car', 'ferry'] as TransportMode[]).map(
+                            (m) => {
+                              const meta = TRANSPORT_MODE_META[m];
+                              const active = tripMode === m;
+                              return (
+                                <button
+                                  key={m}
+                                  type="button"
+                                  onClick={() => handleSwitchRoundTripTransportMode(m)}
+                                  className={`py-1.5 px-1 rounded-xl text-[11px] font-extrabold flex items-center justify-center gap-0.5 transition whitespace-nowrap ${
+                                    active
+                                      ? 'bg-[#1A5D42] text-white shadow-2xs'
+                                      : 'text-[#3B594B] hover:bg-white/70'
+                                  }`}
+                                >
+                                  <span>{meta.icon}</span>
+                                  <span>{meta.shortLabel}</span>
+                                </button>
+                              );
+                            }
+                          )}
+                        </div>
 
-                      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-                        {/* 回程出發時間與機場 */}
-                        <div data-no-flip="true">
-                          <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
-                            {state.inbound.departTime}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => openAirportPicker('inbound', 'depart')}
-                            className="mt-0.5 inline-flex items-center gap-1 text-[16px] font-extrabold text-[#21609E] hover:bg-[#DCEBFA]/60 px-1.5 py-0.5 -ml-1.5 rounded-lg transition"
+                        {/* 若目前為陸路/海陸模式，顯示一鍵套用珠海 / 港珠澳熱門路線快捷列 */}
+                        {!isFlightTrip && (
+                          <div
+                            data-no-flip="true"
+                            className="flex items-center gap-1.5 overflow-x-auto pb-1 tabi-scroll"
                           >
-                            <span>{state.inbound.departCode}</span>
-                            {state.inbound.departTerminal && (
-                              <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#DCEBFA] text-[#1B5791] font-extrabold">
-                                {state.inbound.departTerminal}
+                            <span className="text-[10.5px] font-extrabold text-[#547063] shrink-0">
+                              ⚡ 快捷路線:
+                            </span>
+                            {QUICK_LAND_ROUTES.map((preset) => (
+                              <button
+                                key={preset.id}
+                                type="button"
+                                onClick={() => handleApplyLandPreset(preset)}
+                                className={`px-2.5 py-1 rounded-lg text-[10.5px] font-extrabold border shrink-0 transition whitespace-nowrap ${
+                                  preset.mode === tripMode
+                                    ? 'bg-[#E2F3EA] border-[#9AD8BA] text-[#144B34]'
+                                    : 'bg-[#F8FBF9] border-[#DCEAE2] text-[#476357] hover:bg-[#EAF4EF]'
+                                }`}
+                              >
+                                {preset.title.split('⇄')[0].trim()}
+                              </button>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={() => openAirportPicker('outbound', 'depart')}
+                              className="px-2.5 py-1 rounded-lg text-[10.5px] font-extrabold bg-[#FCE1D6] text-[#9E3516] shrink-0"
+                            >
+                              ✏️ 自訂站點
+                            </button>
+                          </div>
+                        )}
+
+                        {/* OUTBOUND 去程 */}
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-[11.5px] font-extrabold tracking-wider text-[#1C6748] uppercase">
+                              {state.outbound.dateLabel}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => openAirportPicker('outbound', 'depart')}
+                              data-no-flip="true"
+                              className="px-2.5 py-0.5 rounded-full bg-[#D8F3E5] text-[#186043] text-[11px] font-extrabold hover:brightness-95 transition max-w-[175px] truncate"
+                            >
+                              {state.outbound.flightNo}
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                            {/* 去程出發時間與站點 */}
+                            <div className="min-w-0" data-no-flip="true">
+                              <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
+                                {state.outbound.departTime}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => openAirportPicker('outbound', 'depart')}
+                                className="mt-0.5 inline-flex items-center gap-1 text-[15px] font-extrabold text-[#B8431F] hover:bg-[#FCE1D6]/50 px-1.5 py-0.5 -ml-1.5 rounded-lg transition max-w-full"
+                              >
+                                <span className="truncate">{state.outbound.departCode}</span>
+                                {state.outbound.departTerminal && (
+                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#FCE1D6] text-[#9E3516] font-extrabold shrink-0">
+                                    {state.outbound.departTerminal}
+                                  </span>
+                                )}
+                                <span className="text-[10px] shrink-0">🔍</span>
+                              </button>
+                              <div className="text-[12px] text-[#647A70] font-medium truncate">
+                                {state.outbound.departCity}
+                              </div>
+                            </div>
+
+                            {/* 行程線 */}
+                            <div className="flex flex-col items-center px-1.5">
+                              <span className="text-[11px] font-bold text-[#5E4037] mb-1 text-center">
+                                {state.outbound.duration}
                               </span>
-                            )}
-                            <span className="text-[10px]">🔍</span>
-                          </button>
-                          <div className="text-[12px] text-[#647A70] font-medium truncate">
-                            {state.inbound.departCity}
+                              <div className="w-24 sm:w-28 flex items-center">
+                                <div className="h-[2px] flex-1 bg-[#74C6A3]" />
+                                <span className="mx-1 text-[#1E6F4E] text-xs font-bold">
+                                  {outboundModeMeta.routeSymbol}
+                                </span>
+                                <div className="h-[2px] flex-1 bg-[#74C6A3]" />
+                              </div>
+                              <span className="text-[11px] font-bold text-[#22694B] mt-1 text-center line-clamp-1 max-w-[125px]">
+                                {state.outbound.perkLabel}
+                              </span>
+                            </div>
+
+                            {/* 去程抵達時間與站點 */}
+                            <div className="text-right min-w-0" data-no-flip="true">
+                              <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
+                                {state.outbound.arriveTime}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => openAirportPicker('outbound', 'arrive')}
+                                className="mt-0.5 inline-flex items-center justify-end gap-1 text-[15px] font-extrabold text-[#B8431F] hover:bg-[#FCE1D6]/50 px-1.5 py-0.5 -mr-1.5 rounded-lg transition max-w-full"
+                              >
+                                <span className="truncate">{state.outbound.arriveCode}</span>
+                                {state.outbound.arriveTerminal && (
+                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#FCE1D6] text-[#9E3516] font-extrabold shrink-0">
+                                    {state.outbound.arriveTerminal}
+                                  </span>
+                                )}
+                                <span className="text-[10px] shrink-0">🔍</span>
+                              </button>
+                              <div className="text-[12px] text-[#647A70] font-medium truncate">
+                                {state.outbound.arriveCity}
+                              </div>
+                            </div>
                           </div>
                         </div>
 
-                        {/* 航程線 */}
-                        <div className="flex flex-col items-center px-2">
-                          <span className="text-[11px] font-bold text-[#5E4037] mb-1">
-                            {state.inbound.duration}
-                          </span>
-                          <div className="w-28 flex items-center">
-                            <div className="h-[2px] flex-1 bg-[#7BB0E3]" />
-                            <span className="mx-1 text-[#1E5C99] text-xs font-bold">▷</span>
-                            <div className="h-[2px] flex-1 bg-[#7BB0E3]" />
+                        <div className="border-t border-dashed border-[#DCE8E2]" />
+
+                        {/* RETURN 回程 */}
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-[11.5px] font-extrabold tracking-wider text-[#1C5D99] uppercase">
+                              {state.inbound.dateLabel}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => openAirportPicker('inbound', 'depart')}
+                              data-no-flip="true"
+                              className="px-2.5 py-0.5 rounded-full bg-[#DCEBFA] text-[#1B5791] text-[11px] font-extrabold hover:brightness-95 transition max-w-[175px] truncate"
+                            >
+                              {state.inbound.flightNo}
+                            </button>
                           </div>
-                          <span className="text-[11.5px] font-bold text-[#225E96] mt-1">
-                            {state.inbound.perkLabel}
-                          </span>
+
+                          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                            {/* 回程出發時間與站點 */}
+                            <div className="min-w-0" data-no-flip="true">
+                              <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
+                                {state.inbound.departTime}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => openAirportPicker('inbound', 'depart')}
+                                className="mt-0.5 inline-flex items-center gap-1 text-[15px] font-extrabold text-[#21609E] hover:bg-[#DCEBFA]/60 px-1.5 py-0.5 -ml-1.5 rounded-lg transition max-w-full"
+                              >
+                                <span className="truncate">{state.inbound.departCode}</span>
+                                {state.inbound.departTerminal && (
+                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#DCEBFA] text-[#1B5791] font-extrabold shrink-0">
+                                    {state.inbound.departTerminal}
+                                  </span>
+                                )}
+                                <span className="text-[10px] shrink-0">🔍</span>
+                              </button>
+                              <div className="text-[12px] text-[#647A70] font-medium truncate">
+                                {state.inbound.departCity}
+                              </div>
+                            </div>
+
+                            {/* 航程/車程線 */}
+                            <div className="flex flex-col items-center px-1.5">
+                              <span className="text-[11px] font-bold text-[#5E4037] mb-1 text-center">
+                                {state.inbound.duration}
+                              </span>
+                              <div className="w-24 sm:w-28 flex items-center">
+                                <div className="h-[2px] flex-1 bg-[#7BB0E3]" />
+                                <span className="mx-1 text-[#1E5C99] text-xs font-bold">
+                                  {inboundModeMeta.routeSymbol}
+                                </span>
+                                <div className="h-[2px] flex-1 bg-[#7BB0E3]" />
+                              </div>
+                              <span className="text-[11px] font-bold text-[#225E96] mt-1 text-center line-clamp-1 max-w-[125px]">
+                                {state.inbound.perkLabel}
+                              </span>
+                            </div>
+
+                            {/* 回程抵達時間與站點 */}
+                            <div className="text-right min-w-0" data-no-flip="true">
+                              <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
+                                {state.inbound.arriveTime}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => openAirportPicker('inbound', 'arrive')}
+                                className="mt-0.5 inline-flex items-center justify-end gap-1 text-[15px] font-extrabold text-[#21609E] hover:bg-[#DCEBFA]/60 px-1.5 py-0.5 -mr-1.5 rounded-lg transition max-w-full"
+                              >
+                                <span className="truncate">{state.inbound.arriveCode}</span>
+                                {state.inbound.arriveTerminal && (
+                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#DCEBFA] text-[#1B5791] font-extrabold shrink-0">
+                                    {state.inbound.arriveTerminal}
+                                  </span>
+                                )}
+                                <span className="text-[10px] shrink-0">🔍</span>
+                              </button>
+                              <div className="text-[12px] text-[#647A70] font-medium truncate">
+                                {state.inbound.arriveCity}
+                              </div>
+                            </div>
+                          </div>
                         </div>
 
-                        {/* 回程抵達時間與機場 */}
-                        <div className="text-right" data-no-flip="true">
-                          <div className="text-[28px] font-black tracking-tight text-[#14241D] leading-tight tabular-nums">
-                            {state.inbound.arriveTime}
-                          </div>
+                        {/* 底部憑證與行李/證件按鈕 */}
+                        <div className="grid grid-cols-2 gap-2.5 pt-1" data-no-flip="true">
                           <button
                             type="button"
-                            onClick={() => openAirportPicker('inbound', 'arrive')}
-                            className="mt-0.5 inline-flex items-center justify-end gap-1 text-[16px] font-extrabold text-[#21609E] hover:bg-[#DCEBFA]/60 px-1.5 py-0.5 -mr-1.5 rounded-lg transition"
+                            onClick={() => setShowBoardingModal(true)}
+                            className="py-2.5 px-3 rounded-2xl bg-[#E3F1EC] hover:bg-[#d5eae2] text-[#172B22] font-bold text-[12.5px] flex items-center justify-center gap-2 transition"
                           >
-                            <span>{state.inbound.arriveCode}</span>
-                            {state.inbound.arriveTerminal && (
-                              <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#DCEBFA] text-[#1B5791] font-extrabold">
-                                {state.inbound.arriveTerminal}
-                              </span>
-                            )}
-                            <span className="text-[10px]">🔍</span>
+                            <Ticket className="w-4 h-4 text-[#B8431F] shrink-0" />
+                            <div className="leading-tight text-center">
+                              <div>{tripModeMeta.passBtnTitle}</div>
+                              <span className="text-xs">{tripModeMeta.passBtnIcon}</span>
+                            </div>
                           </button>
-                          <div className="text-[12px] text-[#647A70] font-medium truncate">
-                            {state.inbound.arriveCity}
-                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => setShowBaggageModal(true)}
+                            className="py-2.5 px-3 rounded-2xl bg-[#E3F1EC] hover:bg-[#d5eae2] text-[#172B22] font-bold text-[12.5px] flex items-center justify-center gap-2 transition"
+                          >
+                            <Briefcase className="w-4 h-4 text-[#1E6B4B] shrink-0" />
+                            <div className="leading-tight text-center min-w-0">
+                              <div className="truncate">{state.trip.baggageLabel}</div>
+                              <span className="text-xs">🧳</span>
+                            </div>
+                          </button>
                         </div>
                       </div>
                     </div>
+                  );
+                })()}
 
-                    {/* 底部登機證與行李按鈕 */}
-                    <div className="grid grid-cols-2 gap-2.5 pt-1" data-no-flip="true">
-                      <button
-                        type="button"
-                        onClick={() => setShowBoardingModal(true)}
-                        className="py-2.5 px-3 rounded-2xl bg-[#E3F1EC] hover:bg-[#d5eae2] text-[#172B22] font-bold text-[12.5px] flex items-center justify-center gap-2 transition"
-                      >
-                        <Ticket className="w-4 h-4 text-[#B8431F] shrink-0" />
-                        <div className="leading-tight text-center">
-                          <div>Boarding Pass</div>
-                          <span className="text-xs">🎫</span>
-                        </div>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setShowBaggageModal(true)}
-                        className="py-2.5 px-3 rounded-2xl bg-[#E3F1EC] hover:bg-[#d5eae2] text-[#172B22] font-bold text-[12.5px] flex items-center justify-center gap-2 transition"
-                      >
-                        <Briefcase className="w-4 h-4 text-[#1E6B4B] shrink-0" />
-                        <div className="leading-tight text-center">
-                          <div>{state.trip.baggageLabel}</div>
-                          <span className="text-xs">🧳</span>
-                        </div>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 🏨 Your stay (住宿資訊卡片) */}
+                {/* 🏨 Your stay (多間住宿資訊卡片 — 支援依日期自動切換顯示不同酒店) */}
                 <div className="pt-1">
-                  <div className="flex items-center justify-between mb-2.5" data-no-flip="true">
-                    <div className="flex items-center gap-2.5">
-                      <span className="w-9 h-9 rounded-2xl bg-[#CBEBD9] text-[#185B3E] flex items-center justify-center shadow-2xs">
+                  <div className="flex items-center justify-between mb-2.5 gap-2" data-no-flip="true">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="w-9 h-9 rounded-2xl bg-[#CBEBD9] text-[#185B3E] flex items-center justify-center shadow-2xs shrink-0">
                         <BedDouble className="w-4 h-4" />
                       </span>
-                      <h2 className="text-[19px] font-extrabold text-[#162921] tracking-tight">
-                        Your stay
-                      </h2>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <h2 className="text-[19px] font-extrabold text-[#162921] tracking-tight truncate">
+                            Your stay
+                          </h2>
+                          {staysList.length > 1 && (
+                            <span className="px-2 py-0.5 rounded-full bg-[#E3F1EC] text-[#185B3E] text-[10.5px] font-extrabold shrink-0">
+                              共 {staysList.length} 間
+                            </span>
+                          )}
+                        </div>
+                      </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setHotelCandidates([]);
-                        setShowStayModal(true);
-                      }}
-                      className="px-3 py-1 rounded-full bg-[#BDE9D3] hover:bg-[#addfc6] text-[#15563B] text-[11.5px] font-extrabold flex items-center gap-1 transition"
-                    >
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>{state.stay.paidStatus}</span>
-                    </button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleAddNewStay(true)}
+                        className="px-2.5 py-1 rounded-full bg-white hover:bg-[#EAF4EF] border border-[#CFE2D8] text-[#15563B] text-[11px] font-extrabold flex items-center gap-1 shadow-2xs transition whitespace-nowrap"
+                      >
+                        <Plus className="w-3 h-3 stroke-[2.5]" />
+                        <span>新增住宿</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingStayIndex(displayedStayIndex);
+                          setHotelCandidates([]);
+                          setShowStayModal(true);
+                        }}
+                        className="px-3 py-1 rounded-full bg-[#BDE9D3] hover:bg-[#addfc6] text-[#15563B] text-[11.5px] font-extrabold flex items-center gap-1 transition whitespace-nowrap"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>{displayedStay.paidStatus}</span>
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="bg-white rounded-[28px] p-4 shadow-sm border border-[#E2EFE8] space-y-3.5">
+                  <div className="bg-white rounded-[28px] p-4 shadow-sm border border-[#E2EFE8] space-y-3">
+                    {/* 📅 依行程日期切換查看當天入住酒店 */}
+                    <div className="space-y-1.5" data-no-flip="true">
+                      <div className="flex items-center justify-between gap-2 text-[11px] font-bold text-[#476457]">
+                        <span>📅 點選日期查看當晚酒店</span>
+                        {staysList.length > 1 && (
+                          <span className="text-[#1A5D42] font-extrabold">
+                            第 {displayedStayIndex + 1} / {staysList.length} 間
+                            {getStayNights(displayedStay) > 0
+                              ? ` · ${getStayNights(displayedStay)} 晚`
+                              : ''}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1.5 overflow-x-auto day-strip-scroll pb-0.5">
+                        {tripDays.map((d) => {
+                          const match = findStayForDate(staysList, d.iso);
+                          const isActiveDay =
+                            stayPreviewOverrideIndex === null && selectedDay === d.index;
+                          const shortMd = formatShortMd(d.iso) || d.dateDisp;
+                          return (
+                            <button
+                              key={d.iso}
+                              type="button"
+                              onClick={() => {
+                                setStayPreviewOverrideIndex(null);
+                                setSelectedDay(d.index);
+                              }}
+                              className={`px-2.5 py-1.5 rounded-xl text-left shrink-0 border transition flex items-center gap-1.5 ${
+                                isActiveDay
+                                  ? 'bg-[#1A5D42] border-[#1A5D42] text-white shadow-2xs'
+                                  : 'bg-[#F4FAF6] border-[#DCEAE2] text-[#355245] hover:bg-[#E7F3EC]'
+                              }`}
+                            >
+                              <span className="text-[11px] font-extrabold whitespace-nowrap">
+                                {d.label} · {shortMd}
+                              </span>
+                              {staysList.length > 1 && (
+                                <span
+                                  className={`px-1.5 py-0.2 rounded-md text-[9.5px] font-black whitespace-nowrap ${
+                                    isActiveDay
+                                      ? 'bg-white/20 text-white'
+                                      : match.status === 'checkout'
+                                      ? 'bg-[#FCE5DA] text-[#A83815]'
+                                      : match.status === 'unassigned'
+                                      ? 'bg-[#EDEDED] text-[#6B7280]'
+                                      : 'bg-[#D7EFE3] text-[#145338]'
+                                  }`}
+                                >
+                                  {match.status === 'checkout'
+                                    ? '退房日'
+                                    : match.status === 'unassigned'
+                                    ? '待設定'
+                                    : `酒店${match.index + 1}`}
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* 多間住宿快速總覽切換條（直接切換各間飯店） */}
+                      {staysList.length > 1 && (
+                        <div className="flex items-center gap-1.5 overflow-x-auto day-strip-scroll pt-0.5">
+                          {staysList.map((s, idx) => {
+                            const isCurrent = idx === displayedStayIndex;
+                            const rangeTxt =
+                              s.checkInDate && s.checkOutDate
+                                ? `${formatShortMd(s.checkInDate)}–${formatShortMd(s.checkOutDate)}`
+                                : '未設日期';
+                            return (
+                              <button
+                                key={s.id || idx}
+                                type="button"
+                                onClick={() => {
+                                  const matchDay = tripDays.find(
+                                    (d) =>
+                                      s.checkInDate &&
+                                      (s.checkOutDate
+                                        ? d.iso >= s.checkInDate && d.iso < s.checkOutDate
+                                        : d.iso === s.checkInDate)
+                                  );
+                                  if (matchDay) {
+                                    setStayPreviewOverrideIndex(null);
+                                    setSelectedDay(matchDay.index);
+                                  } else {
+                                    setStayPreviewOverrideIndex(idx);
+                                  }
+                                }}
+                                className={`px-2.5 py-1 rounded-lg text-[10.5px] font-extrabold shrink-0 border transition flex items-center gap-1 ${
+                                  isCurrent
+                                    ? 'bg-[#FDF0E7] border-[#E6B39A] text-[#9E3516]'
+                                    : 'bg-[#F8FBF9] border-[#E2EFE8] text-[#547063] hover:bg-[#EEF6F2]'
+                                }`}
+                              >
+                                <span>🏨 {idx + 1}.</span>
+                                <span className="max-w-[110px] truncate">
+                                  {s.hotelName || '未命名飯店'}
+                                </span>
+                                <span className="opacity-75 tabular-nums">({rangeTxt})</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {displayedStayStatus === 'checkout' && (
+                        <div className="px-3 py-1.5 rounded-xl bg-[#FFF4EC] border border-[#F4CEB6] text-[#9E3516] text-[11px] font-bold flex items-center justify-between gap-2">
+                          <span>
+                            🧳 {activeStayDay?.zhDisp} 為「{displayedStay.hotelName || '本飯店'}」退房日
+                          </span>
+                          <span className="font-extrabold shrink-0">{displayedStay.checkOut}</span>
+                        </div>
+                      )}
+
+                      {displayedStayStatus === 'unassigned' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingStayIndex(displayedStayIndex);
+                            setHotelCandidates([]);
+                            setShowStayModal(true);
+                          }}
+                          className="w-full px-3 py-1.5 rounded-xl bg-[#F4F8F6] border border-dashed border-[#B7CFC3] text-[#426052] text-[11px] font-bold text-left hover:bg-[#EAF3EE] transition"
+                        >
+                          ℹ️ {activeStayDay?.zhDisp} 尚未指定專屬住宿（目前顯示相近飯店，點此新增或調整日期）
+                        </button>
+                      )}
+                    </div>
+
                     <div className="flex items-start gap-3.5">
                       <div className="relative w-[88px] h-[88px] shrink-0 group" data-no-flip="true">
                         <img
-                          src={state.stay.photoUrl}
-                          alt={state.stay.hotelName}
+                          src={displayedStay.photoUrl}
+                          alt={displayedStay.hotelName || '住宿圖片'}
                           className="w-[88px] h-[88px] rounded-2xl object-cover shadow-xs"
                           referrerPolicy="no-referrer"
                         />
                         <button
                           type="button"
                           disabled={isSearchingStayPhoto}
-                          onClick={() => handleAutoFindStayPhoto()}
+                          onClick={() =>
+                            handleAutoFindStayPhoto(
+                              displayedStay.hotelName,
+                              displayedStay.address,
+                              displayedStayIndex
+                            )
+                          }
                           title="根據飯店名稱智能換圖"
                           className="absolute bottom-1 right-1 left-1 py-0.5 px-1.5 rounded-lg bg-black/65 hover:bg-black/80 text-white text-[10px] font-extrabold flex items-center justify-center gap-1 backdrop-blur-2xs transition disabled:opacity-60"
                         >
@@ -3706,22 +4201,39 @@ export default function App() {
                         </button>
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="text-[12px] text-[#7D6B63] font-semibold flex items-center gap-1">
-                          <span className="text-[#C85228] tracking-widest">☆☆☆☆</span>
-                          <span>· {state.stay.category}</span>
+                        <div className="text-[12px] text-[#7D6B63] font-semibold flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1 truncate">
+                            <span className="text-[#C85228] tracking-widest">
+                              {'★'.repeat(Math.max(1, displayedStay.stars || 4))}
+                            </span>
+                            <span>· {displayedStay.category}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingStayIndex(displayedStayIndex);
+                              setHotelCandidates([]);
+                              setShowStayModal(true);
+                            }}
+                            data-no-flip="true"
+                            className="text-[11px] font-extrabold text-[#1A5D42] hover:underline shrink-0"
+                          >
+                            ✏️ 編輯
+                          </button>
                         </div>
                         <h3
                           onClick={() => {
+                            setEditingStayIndex(displayedStayIndex);
                             setHotelCandidates([]);
                             setShowStayModal(true);
                           }}
                           className="text-[17px] font-extrabold text-[#152720] leading-snug mt-0.5 cursor-pointer hover:text-[#1D6B4B] truncate"
                           data-no-flip="true"
                         >
-                          {state.stay.hotelName}
+                          {displayedStay.hotelName || '點擊設定飯店名稱'}
                         </h3>
                         <p className="text-[12px] text-[#665A54] truncate mt-0.5">
-                          {state.stay.subTitle}
+                          {displayedStay.subTitle || '點擊編輯房型與 Check-in 日期'}
                         </p>
                       </div>
                     </div>
@@ -3729,6 +4241,7 @@ export default function App() {
                     {/* CHECK-IN / CHECK-OUT */}
                     <div
                       onClick={() => {
+                        setEditingStayIndex(displayedStayIndex);
                         setHotelCandidates([]);
                         setShowStayModal(true);
                       }}
@@ -3739,16 +4252,21 @@ export default function App() {
                         <div className="text-[10.5px] font-bold tracking-wider text-[#436456] uppercase">
                           CHECK-IN
                         </div>
-                        <div className="text-[14px] font-extrabold text-[#13251E] mt-0.5">
-                          {state.stay.checkIn}
+                        <div className="text-[14px] font-extrabold text-[#13251E] mt-0.5 tabular-nums">
+                          {displayedStay.checkIn}
                         </div>
                       </div>
+                      {getStayNights(displayedStay) > 0 && (
+                        <div className="px-2.5 py-0.5 rounded-full bg-white/80 text-[#1A5D42] text-[10.5px] font-extrabold tabular-nums">
+                          {getStayNights(displayedStay)} 晚
+                        </div>
+                      )}
                       <div className="text-right">
                         <div className="text-[10.5px] font-bold tracking-wider text-[#436456] uppercase">
                           CHECK-OUT
                         </div>
-                        <div className="text-[14px] font-extrabold text-[#13251E] mt-0.5">
-                          {state.stay.checkOut}
+                        <div className="text-[14px] font-extrabold text-[#13251E] mt-0.5 tabular-nums">
+                          {displayedStay.checkOut}
                         </div>
                       </div>
                     </div>
@@ -3760,11 +4278,15 @@ export default function App() {
                     >
                       <div className="flex items-center gap-2 min-w-0 text-[12.5px] text-[#355245] font-medium">
                         <MapPin className="w-4 h-4 text-[#C24726] shrink-0" />
-                        <span className="truncate">{state.stay.address}</span>
+                        <span className="truncate">
+                          {displayedStay.address || '尚未填寫飯店地址（點擊編輯可自動搜尋）'}
+                        </span>
                       </div>
                       <button
                         type="button"
-                        onClick={() => openGoogleMaps(`${state.stay.hotelName} ${state.stay.address}`)}
+                        onClick={() =>
+                          openGoogleMaps(`${displayedStay.hotelName} ${displayedStay.address}`)
+                        }
                         className="px-3 py-1 rounded-full bg-[#1C6748] hover:bg-[#144f37] text-white text-[11.5px] font-bold flex items-center gap-1 shrink-0 shadow-2xs transition"
                       >
                         <span>🗺️ 地圖</span>
@@ -3772,13 +4294,15 @@ export default function App() {
                     </div>
 
                     {/* 住宿小貼士 (已轉為繁體中文) */}
-                    <div className="rounded-2xl bg-[#FDF0E7] p-3.5 flex items-start gap-2.5 text-[12px] leading-relaxed text-[#5C3626]">
-                      <span className="text-base shrink-0">💡</span>
-                      <div>
-                        <strong className="text-[#9E3516] font-extrabold">住宿小貼士：</strong>
-                        {state.stay.insiderScoop}
+                    {displayedStay.insiderScoop && (
+                      <div className="rounded-2xl bg-[#FDF0E7] p-3.5 flex items-start gap-2.5 text-[12px] leading-relaxed text-[#5C3626]">
+                        <span className="text-base shrink-0">💡</span>
+                        <div>
+                          <strong className="text-[#9E3516] font-extrabold">住宿小貼士：</strong>
+                          {displayedStay.insiderScoop}
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -4011,6 +4535,53 @@ export default function App() {
                     })}
                   </div>
                 </div>
+
+                {/* 🏨 當日住宿提示列（多間酒店時隨切換 Day 自動顯示該日飯店） */}
+                {(() => {
+                  const planDayIso = tripDays[selectedDay]?.iso || state.trip.startDate;
+                  const planStayMatch = findStayForDate(staysList, planDayIso);
+                  return (
+                    <div
+                      data-no-flip="true"
+                      className="rounded-2xl bg-white/90 border border-[#D8E9E0] px-3.5 py-2 flex items-center justify-between gap-2 shadow-2xs"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingStayIndex(planStayMatch.index);
+                          setHotelCandidates([]);
+                          setShowStayModal(true);
+                        }}
+                        className="min-w-0 flex-1 flex items-center gap-2 text-left"
+                      >
+                        <BedDouble className="w-4 h-4 text-[#1A5D42] shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[11.5px] font-extrabold text-[#162921] truncate">
+                            {planStayMatch.status === 'checkout'
+                              ? `退房日：${planStayMatch.stay.hotelName || '未設定飯店'}`
+                              : planStayMatch.status === 'unassigned'
+                              ? `尚未指定當晚酒店（點此新增）`
+                              : `當晚住宿：${planStayMatch.stay.hotelName || '未設定飯店'}`}
+                          </div>
+                          <div className="text-[10px] text-[#5B7368] truncate">
+                            {planStayMatch.stay.checkIn} → {planStayMatch.stay.checkOut}
+                          </div>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openGoogleMaps(
+                            `${planStayMatch.stay.hotelName} ${planStayMatch.stay.address}`
+                          )
+                        }
+                        className="px-2.5 py-1 rounded-full bg-[#E3F1EC] hover:bg-[#d2e8df] text-[#15563B] text-[10.5px] font-extrabold shrink-0 transition"
+                      >
+                        🗺️ 導航
+                      </button>
+                    </div>
+                  );
+                })()}
 
                 {/* Arrive. Settle in. Explore. 摘要橫幅 + 當日預算小計與自動排序 */}
                 <div className="rounded-2xl bg-[#E4F0EA] p-3.5 space-y-2.5" data-no-flip="true">
@@ -4578,6 +5149,20 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+
+                {/* 📋 一鍵旅程總結與圖文匯出入口 */}
+                <button
+                  type="button"
+                  onClick={() => setShowTripSummaryModal(true)}
+                  data-no-flip="true"
+                  className="w-full min-h-[48px] px-4 py-3 rounded-2xl bg-[#1A5D42] hover:bg-[#144832] text-white flex items-center justify-between gap-3 shadow-xs transition"
+                >
+                  <span className="flex items-center gap-2.5 text-[13.5px] font-extrabold">
+                    <FileText className="w-4 h-4 shrink-0" />
+                    <span>一鍵總結行程與經費（HTML / PDF / 長圖）</span>
+                  </span>
+                  <ChevronRight className="w-4 h-4 shrink-0 opacity-85" />
+                </button>
 
                 {/* 🧾 快速記帳 Quick Expense Log */}
                 <div className="space-y-3 pt-1" data-no-flip="true">
@@ -5213,7 +5798,7 @@ export default function App() {
           彈出視窗群 (Modals)
          ===================================================================== */}
 
-      {/* 1. 升級版：包含即時搜尋過濾功能的國際機場與航廈選擇器 Modal */}
+      {/* 1. 升級版：國際機場與陸路/海陸交通站點設定器 Modal */}
       <AirportSearchModal
         open={airportModalOpen}
         initialSlot={airportTargetSlot}
@@ -5230,6 +5815,8 @@ export default function App() {
             trip: { ...prev.trip, airlineLabel: label },
           }))
         }
+        onChangeTransportMode={handleSwitchRoundTripTransportMode}
+        onApplyLandPreset={handleApplyLandPreset}
         onClose={() => setAirportModalOpen(false)}
       />
 
@@ -5937,263 +6524,438 @@ export default function App() {
         </div>
       )}
 
-      {/* 6. 住宿編輯 Modal (支援輸入飯店名稱後自動搜尋地址 + 多個分館選擇卡片) */}
-      {showStayModal && (
-        <div
-          className="fixed inset-0 z-[150] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
-          onClick={() => setShowStayModal(false)}
-        >
+      {/* 6. 住宿編輯 Modal (支援多間飯店管理、Check-in/out 日期選擇、自動搜尋地址與智能配圖) */}
+      {showStayModal && (() => {
+        const modalStayIndex = Math.min(editingStayIndex, Math.max(0, staysList.length - 1));
+        const modalStay = staysList[modalStayIndex] || staysList[0];
+        const nightsCount = getStayNights(modalStay);
+        return (
           <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3 max-h-[90vh] overflow-y-auto tabi-scroll"
+            className="fixed inset-0 z-[150] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+            onClick={() => setShowStayModal(false)}
           >
-            <div className="flex items-center justify-between border-b border-[#EBF3EE] pb-2">
-              <div>
-                <h3 className="text-lg font-extrabold text-[#14241D]">🏨 編輯住宿資訊</h3>
-                <p className="text-[11px] text-[#5B7368]">
-                  輸入飯店名稱後可自動檢索地址；若有多間分館會跳出選擇卡片
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowStayModal(false)}
-                className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center shrink-0"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-1 gap-1.5 flex-wrap">
-                <label className="text-xs font-bold text-[#4A6357]">飯店名稱</label>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    disabled={isSearchingStayPhoto}
-                    onClick={() => handleAutoFindStayPhoto()}
-                    className="px-2.5 py-1 rounded-lg bg-[#FCE3DA] hover:bg-[#f7d0c1] text-[#B83E1B] text-[11px] font-extrabold flex items-center gap-1 transition disabled:opacity-50"
-                  >
-                    {isSearchingStayPhoto ? (
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                    ) : (
-                      <ImageIcon className="w-3 h-3" />
-                    )}
-                    <span>{isSearchingStayPhoto ? '換圖中...' : '智能換圖'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isSearchingHotelAddress}
-                    onClick={() => handleSearchHotelAddress()}
-                    className="px-2.5 py-1 rounded-lg bg-[#E3F2EA] hover:bg-[#CFE8DB] text-[#165C3E] text-[11px] font-extrabold flex items-center gap-1 transition disabled:opacity-50"
-                  >
-                    {isSearchingHotelAddress ? (
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                    ) : (
-                      <Search className="w-3 h-3" />
-                    )}
-                    <span>{isSearchingHotelAddress ? '搜尋地址中...' : '自動搜尋地址'}</span>
-                  </button>
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3 max-h-[90vh] overflow-y-auto tabi-scroll"
+            >
+              <div className="flex items-center justify-between border-b border-[#EBF3EE] pb-2">
+                <div>
+                  <h3 className="text-lg font-extrabold text-[#14241D]">
+                    🏨 編輯住宿資訊 ({staysList.length} 間)
+                  </h3>
+                  <p className="text-[11px] text-[#5B7368]">
+                    可為不同日期新增多間酒店，並設定 Check-in / Check-out 日期與時間
+                  </p>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setShowStayModal(false)}
+                  className="w-8 h-8 rounded-full bg-[#F2F8F5] text-[#4F665B] flex items-center justify-center shrink-0"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-              <input
-                type="text"
-                value={state.stay.hotelName}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setState((prev) => ({
-                    ...prev,
-                    stay: { ...prev.stay, hotelName: val },
-                  }));
-                }}
-                onBlur={() => {
-                  if (state.stay.hotelName.trim().length >= 2 && !state.stay.address.trim()) {
-                    handleSearchHotelAddress(state.stay.hotelName);
-                  }
-                }}
-                placeholder="例如：APA Hotel 京都、東橫INN、The Gate Hotel..."
-                className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
-              />
-            </div>
 
-            {/* 飯店目前圖片預覽與一鍵智能換圖列 */}
-            <div className="p-2.5 rounded-2xl bg-[#F4FAF6] border border-[#DCEAE2] flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <img
-                  src={state.stay.photoUrl}
-                  alt={state.stay.hotelName}
-                  className="w-12 h-12 rounded-xl object-cover shrink-0 border border-[#CFE3D8]"
-                  referrerPolicy="no-referrer"
-                />
-                <div className="min-w-0">
-                  <div className="text-[11.5px] font-extrabold text-[#14241D] truncate">
-                    飯店封面圖片
-                  </div>
-                  <div className="text-[10.5px] text-[#5B7368] truncate">
-                    點擊右側按鈕可根據飯店自動配圖或切換照片
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                disabled={isSearchingStayPhoto}
-                onClick={() => handleAutoFindStayPhoto()}
-                className="px-3 py-1.5 rounded-xl bg-white hover:bg-[#EAF4EF] border border-[#CFE3D8] text-[#1A5D42] text-[11px] font-extrabold shrink-0 flex items-center gap-1 shadow-2xs transition disabled:opacity-50"
-              >
-                {isSearchingStayPhoto ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <ImageIcon className="w-3.5 h-3.5" />
-                )}
-                <span>換一張</span>
-              </button>
-            </div>
-
-            {/* 若發現多個分館或多個符合地址，跳出選擇卡片 */}
-            {hotelCandidates.length > 0 && (
-              <div className="p-3 rounded-2xl bg-[#FFF6F2] border border-[#F5D0C1] space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11.5px] font-extrabold text-[#B8431F]">
-                    📍 找到 {hotelCandidates.length} 個相關飯店地址，請點選分館：
+              {/* 多間住宿切換標籤列 + 新增按鈕 */}
+              <div className="space-y-1.5 bg-[#F7FBF9] p-2.5 rounded-2xl border border-[#DCEAE2]">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-extrabold text-[#355245]">
+                    選擇要編輯的飯店（依入住日期自動切換顯示）
                   </span>
                   <button
                     type="button"
-                    onClick={() => setHotelCandidates([])}
-                    className="text-[10.5px] font-bold text-[#7A6258] hover:underline"
+                    onClick={() => handleAddNewStay(false)}
+                    className="px-2.5 py-1 rounded-lg bg-[#1A5D42] hover:bg-[#134631] text-white text-[11px] font-extrabold flex items-center gap-1 shrink-0 transition"
                   >
-                    收起
+                    <Plus className="w-3 h-3 stroke-[2.5]" />
+                    <span>新增一間酒店</span>
                   </button>
                 </div>
-                <div className="space-y-1.5 max-h-44 overflow-y-auto tabi-scroll pr-0.5">
-                  {hotelCandidates.map((cand) => (
-                    <button
-                      key={cand.id}
-                      type="button"
-                      onClick={() => {
-                        setState((prev) => ({
-                          ...prev,
-                          stay: {
-                            ...prev.stay,
-                            hotelName: cand.name,
-                            address: cand.address,
-                          },
-                        }));
-                        setHotelCandidates([]);
-                        showToast(`✅ 已套用「${cand.name}」的地址並自動配圖！`);
-                        handleAutoFindStayPhoto(cand.name, cand.address);
-                      }}
-                      className="w-full p-2.5 rounded-xl bg-white hover:bg-[#EAF4EF] border border-[#E6D5CE] hover:border-[#1A5D42] text-left transition group"
-                    >
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="text-xs font-extrabold text-[#14241D] group-hover:text-[#1A5D42] truncate">
-                          {cand.name}
-                        </span>
-                        {cand.branchNote && (
-                          <span className="px-1.5 py-0.5 rounded-md bg-[#E3F2EA] text-[#165C3E] text-[9.5px] font-extrabold shrink-0">
-                            {cand.branchNote}
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[11px] text-[#5B7368] mt-0.5 leading-snug">
-                        {cand.address}
-                      </div>
-                    </button>
-                  ))}
+
+                <div className="flex items-center gap-1.5 overflow-x-auto day-strip-scroll pb-0.5">
+                  {staysList.map((s, idx) => {
+                    const active = idx === modalStayIndex;
+                    const rangeLabel =
+                      s.checkInDate && s.checkOutDate
+                        ? `${formatShortMd(s.checkInDate)}–${formatShortMd(s.checkOutDate)}`
+                        : '未設日期';
+                    return (
+                      <button
+                        key={s.id || idx}
+                        type="button"
+                        onClick={() => {
+                          setEditingStayIndex(idx);
+                          setHotelCandidates([]);
+                        }}
+                        className={`px-2.5 py-1.5 rounded-xl text-left shrink-0 border transition ${
+                          active
+                            ? 'bg-[#1A5D42] border-[#1A5D42] text-white shadow-2xs'
+                            : 'bg-white border-[#DCEAE2] text-[#2B463A] hover:bg-[#EAF4EF]'
+                        }`}
+                      >
+                        <div className="text-[11px] font-extrabold max-w-[130px] truncate">
+                          #{idx + 1} {s.hotelName || '未命名飯店'}
+                        </div>
+                        <div
+                          className={`text-[9.5px] font-bold tabular-nums ${
+                            active ? 'text-[#CBEAD9]' : 'text-[#5B7368]'
+                          }`}
+                        >
+                          {rangeLabel}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
-            )}
 
-            <div>
-              <label className="text-xs font-bold text-[#4A6357] block mb-1">地址 (可自動帶入或手動微調)</label>
-              <input
-                type="text"
-                value={state.stay.address}
-                onChange={(e) =>
-                  setState((prev) => ({
-                    ...prev,
-                    stay: { ...prev.stay, address: e.target.value },
-                  }))
-                }
-                placeholder="輸入飯店名稱後點擊「自動搜尋地址」即可自動填寫"
-                className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-semibold"
-              />
-            </div>
-
-            <div>
-              <label className="text-xs font-bold text-[#4A6357] block mb-1">房型與副標題</label>
-              <input
-                type="text"
-                value={state.stay.subTitle}
-                onChange={(e) =>
-                  setState((prev) => ({
-                    ...prev,
-                    stay: { ...prev.stay, subTitle: e.target.value },
-                  }))
-                }
-                className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="text-xs font-bold text-[#4A6357] block mb-1">Check-in</label>
+                <div className="flex items-center justify-between mb-1 gap-1.5 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-bold text-[#4A6357]">
+                      第 {modalStayIndex + 1} 間飯店名稱
+                    </label>
+                    {staysList.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveStayAt(modalStayIndex)}
+                        className="px-2 py-0.5 rounded-md bg-[#FCE3DA] hover:bg-[#f7d0c1] text-[#B83E1B] text-[10px] font-extrabold flex items-center gap-0.5 transition"
+                      >
+                        <Trash2 className="w-2.5 h-2.5" />
+                        <span>刪除此間</span>
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={isSearchingStayPhoto}
+                      onClick={() =>
+                        handleAutoFindStayPhoto(
+                          modalStay.hotelName,
+                          modalStay.address,
+                          modalStayIndex
+                        )
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-[#FCE3DA] hover:bg-[#f7d0c1] text-[#B83E1B] text-[11px] font-extrabold flex items-center gap-1 transition disabled:opacity-50"
+                    >
+                      {isSearchingStayPhoto ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <ImageIcon className="w-3 h-3" />
+                      )}
+                      <span>{isSearchingStayPhoto ? '換圖中...' : '智能換圖'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSearchingHotelAddress}
+                      onClick={() =>
+                        handleSearchHotelAddress(modalStay.hotelName, modalStayIndex)
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-[#E3F2EA] hover:bg-[#CFE8DB] text-[#165C3E] text-[11px] font-extrabold flex items-center gap-1 transition disabled:opacity-50"
+                    >
+                      {isSearchingHotelAddress ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Search className="w-3 h-3" />
+                      )}
+                      <span>{isSearchingHotelAddress ? '搜尋地址中...' : '自動搜尋地址'}</span>
+                    </button>
+                  </div>
+                </div>
                 <input
                   type="text"
-                  value={state.stay.checkIn}
-                  onChange={(e) =>
-                    setState((prev) => ({
-                      ...prev,
-                      stay: { ...prev.stay, checkIn: e.target.value },
-                    }))
-                  }
-                  className="w-full px-3 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold"
+                  value={modalStay.hotelName}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    updateStayAt(modalStayIndex, (s) => ({ ...s, hotelName: val }));
+                  }}
+                  onBlur={() => {
+                    if (modalStay.hotelName.trim().length >= 2 && !modalStay.address.trim()) {
+                      handleSearchHotelAddress(modalStay.hotelName, modalStayIndex);
+                    }
+                  }}
+                  placeholder="例如：珠海瑞吉酒店、橫琴長隆企鵝酒店、APA Hotel..."
+                  className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
                 />
               </div>
+
+              {/* 飯店目前圖片預覽與一鍵智能換圖列 */}
+              <div className="p-2.5 rounded-2xl bg-[#F4FAF6] border border-[#DCEAE2] flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <img
+                    src={modalStay.photoUrl}
+                    alt={modalStay.hotelName || '飯店圖片'}
+                    className="w-12 h-12 rounded-xl object-cover shrink-0 border border-[#CFE3D8]"
+                    referrerPolicy="no-referrer"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-[11.5px] font-extrabold text-[#14241D] truncate">
+                      飯店封面圖片
+                    </div>
+                    <div className="text-[10.5px] text-[#5B7368] truncate">
+                      點擊右側按鈕可根據飯店自動配圖或切換照片
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={isSearchingStayPhoto}
+                  onClick={() =>
+                    handleAutoFindStayPhoto(
+                      modalStay.hotelName,
+                      modalStay.address,
+                      modalStayIndex
+                    )
+                  }
+                  className="px-3 py-1.5 rounded-xl bg-white hover:bg-[#EAF4EF] border border-[#CFE3D8] text-[#1A5D42] text-[11px] font-extrabold shrink-0 flex items-center gap-1 shadow-2xs transition disabled:opacity-50"
+                >
+                  {isSearchingStayPhoto ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <ImageIcon className="w-3.5 h-3.5" />
+                  )}
+                  <span>換一張</span>
+                </button>
+              </div>
+
+              {/* 若發現多個分館或多個符合地址，跳出選擇卡片 */}
+              {hotelCandidates.length > 0 && (
+                <div className="p-3 rounded-2xl bg-[#FFF6F2] border border-[#F5D0C1] space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11.5px] font-extrabold text-[#B8431F]">
+                      📍 找到 {hotelCandidates.length} 個相關飯店地址，請點選分館：
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setHotelCandidates([])}
+                      className="text-[10.5px] font-bold text-[#7A6258] hover:underline"
+                    >
+                      收起
+                    </button>
+                  </div>
+                  <div className="space-y-1.5 max-h-44 overflow-y-auto tabi-scroll pr-0.5">
+                    {hotelCandidates.map((cand) => (
+                      <button
+                        key={cand.id}
+                        type="button"
+                        onClick={() => {
+                          updateStayAt(modalStayIndex, (s) => ({
+                            ...s,
+                            hotelName: cand.name,
+                            address: cand.address,
+                          }));
+                          setHotelCandidates([]);
+                          showToast(`✅ 已套用「${cand.name}」的地址並自動配圖！`);
+                          handleAutoFindStayPhoto(cand.name, cand.address, modalStayIndex);
+                        }}
+                        className="w-full p-2.5 rounded-xl bg-white hover:bg-[#EAF4EF] border border-[#E6D5CE] hover:border-[#1A5D42] text-left transition group"
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-xs font-extrabold text-[#14241D] group-hover:text-[#1A5D42] truncate">
+                            {cand.name}
+                          </span>
+                          {cand.branchNote && (
+                            <span className="px-1.5 py-0.5 rounded-md bg-[#E3F2EA] text-[#165C3E] text-[9.5px] font-extrabold shrink-0">
+                              {cand.branchNote}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-[#5B7368] mt-0.5 leading-snug">
+                          {cand.address}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Check-in / Check-out 日期與時間選擇器 */}
+              <div className="p-3 rounded-2xl bg-[#F4FAF6] border border-[#DCEAE2] space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-extrabold text-[#14241D]">
+                    📅 Check-in / Check-out 日期與時間
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full bg-[#E3F1EC] text-[#1A5D42] text-[10.5px] font-extrabold tabular-nums">
+                    {nightsCount > 0 ? `共 ${nightsCount} 晚` : '請選入住/退房日'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="space-y-1 min-w-0">
+                    <label className="text-[11px] font-bold text-[#4A6357] block">
+                      Check-in 入住日期
+                    </label>
+                    <input
+                      type="date"
+                      value={modalStay.checkInDate || ''}
+                      onChange={(e) => {
+                        const nextInDate = e.target.value;
+                        updateStayAt(modalStayIndex, (s) => {
+                          const inTime = s.checkInTime || '15:00';
+                          const outTime = s.checkOutTime || '11:00';
+                          let nextOutDate = s.checkOutDate || '';
+                          if (nextInDate && (!nextOutDate || nextOutDate <= nextInDate)) {
+                            nextOutDate = addDaysIso(nextInDate, 1);
+                          }
+                          return {
+                            ...s,
+                            checkInDate: nextInDate,
+                            checkOutDate: nextOutDate,
+                            checkIn: formatStayCheckLabel(nextInDate, inTime, s.checkIn),
+                            checkOut: formatStayCheckLabel(nextOutDate, outTime, s.checkOut),
+                          };
+                        });
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-xl bg-white border border-[#DCEAE2] text-xs font-bold text-[#14241D]"
+                    />
+                    <input
+                      type="time"
+                      value={modalStay.checkInTime || '15:00'}
+                      onChange={(e) => {
+                        const nextTime = e.target.value || '15:00';
+                        updateStayAt(modalStayIndex, (s) => ({
+                          ...s,
+                          checkInTime: nextTime,
+                          checkIn: formatStayCheckLabel(s.checkInDate, nextTime, s.checkIn),
+                        }));
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-xl bg-white border border-[#DCEAE2] text-xs font-bold text-[#14241D]"
+                    />
+                  </div>
+
+                  <div className="space-y-1 min-w-0">
+                    <label className="text-[11px] font-bold text-[#4A6357] block">
+                      Check-out 退房日期
+                    </label>
+                    <input
+                      type="date"
+                      value={modalStay.checkOutDate || ''}
+                      min={modalStay.checkInDate || undefined}
+                      onChange={(e) => {
+                        const nextOutDate = e.target.value;
+                        updateStayAt(modalStayIndex, (s) => {
+                          const outTime = s.checkOutTime || '11:00';
+                          return {
+                            ...s,
+                            checkOutDate: nextOutDate,
+                            checkOut: formatStayCheckLabel(nextOutDate, outTime, s.checkOut),
+                          };
+                        });
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-xl bg-white border border-[#DCEAE2] text-xs font-bold text-[#14241D]"
+                    />
+                    <input
+                      type="time"
+                      value={modalStay.checkOutTime || '11:00'}
+                      onChange={(e) => {
+                        const nextTime = e.target.value || '11:00';
+                        updateStayAt(modalStayIndex, (s) => ({
+                          ...s,
+                          checkOutTime: nextTime,
+                          checkOut: formatStayCheckLabel(s.checkOutDate, nextTime, s.checkOut),
+                        }));
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-xl bg-white border border-[#DCEAE2] text-xs font-bold text-[#14241D]"
+                    />
+                  </div>
+                </div>
+
+                <div className="text-[10.5px] font-bold text-[#476457] flex items-center justify-between pt-0.5">
+                  <span>卡片顯示：{modalStay.checkIn} ～ {modalStay.checkOut}</span>
+                </div>
+              </div>
+
               <div>
-                <label className="text-xs font-bold text-[#4A6357] block mb-1">Check-out</label>
+                <label className="text-xs font-bold text-[#4A6357] block mb-1">
+                  地址 (可自動帶入或手動微調)
+                </label>
                 <input
                   type="text"
-                  value={state.stay.checkOut}
+                  value={modalStay.address}
                   onChange={(e) =>
-                    setState((prev) => ({
-                      ...prev,
-                      stay: { ...prev.stay, checkOut: e.target.value },
-                    }))
+                    updateStayAt(modalStayIndex, (s) => ({ ...s, address: e.target.value }))
                   }
-                  className="w-full px-3 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold"
+                  placeholder="輸入飯店名稱後點擊「自動搜尋地址」即可自動填寫"
+                  className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-semibold"
                 />
               </div>
-            </div>
 
-            <div>
-              <label className="text-xs font-bold text-[#4A6357] block mb-1">
-                💡 住宿小貼士 (中文備註)
-              </label>
-              <input
-                type="text"
-                value={state.stay.insiderScoop}
-                onChange={(e) =>
-                  setState((prev) => ({
-                    ...prev,
-                    stay: { ...prev.stay, insiderScoop: e.target.value },
-                  }))
-                }
-                className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs"
-              />
-            </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-bold text-[#4A6357] block mb-1">房型與副標題</label>
+                  <input
+                    type="text"
+                    value={modalStay.subTitle}
+                    onChange={(e) =>
+                      updateStayAt(modalStayIndex, (s) => ({ ...s, subTitle: e.target.value }))
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-[#4A6357] block mb-1">預訂狀態</label>
+                  <select
+                    value={modalStay.paidStatus}
+                    onChange={(e) =>
+                      updateStayAt(modalStayIndex, (s) => ({ ...s, paidStatus: e.target.value }))
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs font-bold text-[#14241D]"
+                  >
+                    <option value="Paid & Booked">Paid & Booked (已付款)</option>
+                    <option value="已預訂 · 到店付款">已預訂 · 到店付款</option>
+                    <option value="待確認 / 計畫中">待確認 / 計畫中</option>
+                  </select>
+                </div>
+              </div>
 
-            <button
-              type="button"
-              onClick={async () => {
-                setShowStayModal(false);
-                await handleAutoFindStayPhoto(state.stay.hotelName, state.stay.address);
-              }}
-              className="w-full py-2.5 rounded-xl bg-[#1A5D42] text-white font-extrabold text-sm mt-2"
-            >
-              儲存住宿設定並自動配圖
-            </button>
+              <div>
+                <label className="text-xs font-bold text-[#4A6357] block mb-1">
+                  💡 住宿小貼士 (中文備註)
+                </label>
+                <input
+                  type="text"
+                  value={modalStay.insiderScoop}
+                  onChange={(e) =>
+                    updateStayAt(modalStayIndex, (s) => ({ ...s, insiderScoop: e.target.value }))
+                  }
+                  placeholder="例如：免費穿梭巴士、延遲退房、附近美食..."
+                  className="w-full px-3.5 py-2 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-xs"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  const targetName = modalStay.hotelName;
+                  const targetAddr = modalStay.address;
+                  const targetId = modalStay.id;
+                  setState((prev) => {
+                    const sorted = sortStaysByDate(normalizeStaysList(prev));
+                    return {
+                      ...prev,
+                      stays: sorted,
+                      stay: sorted[0] || prev.stay,
+                    };
+                  });
+                  setStayPreviewOverrideIndex(null);
+                  setShowStayModal(false);
+                  if (targetName.trim()) {
+                    const sortedIdx = Math.max(
+                      0,
+                      sortStaysByDate(staysList).findIndex((s) => s.id === targetId)
+                    );
+                    await handleAutoFindStayPhoto(targetName, targetAddr, sortedIdx);
+                  }
+                }}
+                className="w-full py-2.5 rounded-xl bg-[#1A5D42] hover:bg-[#134631] text-white font-extrabold text-sm mt-2 transition"
+              >
+                儲存住宿設定（依日期排序）並自動配圖
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* 7. 目的地與旅行起訖日期編輯 Modal (輸入目的地後自動尋找合適封面圖片) */}
       {showTripModal && (
@@ -6410,41 +7172,59 @@ export default function App() {
         </div>
       )}
 
-      {/* 9. 登機證預覽 Modal */}
-      {showBoardingModal && (
-        <div
-          className="fixed inset-0 z-[150] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
-          onClick={() => setShowBoardingModal(false)}
-        >
+      {/* 9. 登機證 / 車票乘車憑證預覽 Modal */}
+      {showBoardingModal && (() => {
+        const mode = getLegTransportMode(state.outbound);
+        const modeMeta = TRANSPORT_MODE_META[mode];
+        const isFlight = mode === 'flight';
+        return (
           <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-xs bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] text-center space-y-3"
+            className="fixed inset-0 z-[150] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+            onClick={() => setShowBoardingModal(false)}
           >
-            <span className="px-3 py-1 rounded-full bg-[#D8F3E5] text-[#186043] text-xs font-extrabold">
-              {state.outbound.flightNo} · TERMINAL {state.outbound.departTerminal || 'T1'}
-            </span>
-            <div className="text-2xl font-black text-[#14241D]">
-              {state.outbound.departCode} ➔ {state.outbound.arriveCode}
-            </div>
-            <div className="text-xs text-[#5B7368] font-bold">
-              {state.outbound.dateLabel} · SEAT 18A (Window)
-            </div>
-            <div className="p-4 bg-[#F4FAF6] rounded-2xl border border-dashed border-[#B7D8C6] font-mono text-xs tracking-widest text-[#1A5D42]">
-              |||| |||| || ||||| ||| |||| ||||
-              <div className="mt-1 text-[10px]">GO-TRAVEL-PASS-NH991</div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowBoardingModal(false)}
-              className="w-full py-2.5 rounded-xl bg-[#1A5D42] text-white font-extrabold text-sm"
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-xs bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] text-center space-y-3"
             >
-              關閉登機證
-            </button>
+              <div className="text-xs font-extrabold text-[#1A5D42]">
+                {modeMeta.icon} {modeMeta.passModalTitle}
+              </div>
+              <span className="inline-block px-3 py-1 rounded-full bg-[#D8F3E5] text-[#186043] text-xs font-extrabold">
+                {state.outbound.flightNo}
+                {state.outbound.departTerminal
+                  ? ` · ${modeMeta.codeBadgeLabel} ${state.outbound.departTerminal}`
+                  : isFlight
+                  ? ' · TERMINAL T1'
+                  : ''}
+              </span>
+              <div className="text-2xl font-black text-[#14241D]">
+                {state.outbound.departCode} {modeMeta.routeSymbol} {state.outbound.arriveCode}
+              </div>
+              <div className="text-xs text-[#5B7368] font-bold">
+                {state.outbound.dateLabel} · {state.outbound.departTime} → {state.outbound.arriveTime}
+              </div>
+              <div className="text-[11.5px] font-bold text-[#355245]">
+                {modeMeta.passSeatOrNote}
+              </div>
+              <div className="p-4 bg-[#F4FAF6] rounded-2xl border border-dashed border-[#B7D8C6] font-mono text-xs tracking-widest text-[#1A5D42]">
+                |||| |||| || ||||| ||| |||| ||||
+                <div className="mt-1 text-[10px]">
+                  {isFlight ? 'GO-TRAVEL-PASS' : `LAND-PASS-${state.outbound.arriveCode}`}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowBoardingModal(false)}
+                className="w-full py-2.5 rounded-xl bg-[#1A5D42] text-white font-extrabold text-sm"
+              >
+                關閉憑證
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
-      {/* 10. 行李額度編輯 Modal */}
+      {/* 10. 行李與隨身證件額度編輯 Modal */}
       {showBaggageModal && (
         <div
           className="fixed inset-0 z-[150] bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
@@ -6454,7 +7234,7 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
             className="w-full max-w-xs bg-white rounded-3xl p-5 shadow-2xl border border-[#DCEAE2] space-y-3"
           >
-            <h3 className="text-base font-extrabold text-[#14241D]">🧳 行李額度設定</h3>
+            <h3 className="text-base font-extrabold text-[#14241D]">🧳 行李與隨身證件備忘</h3>
             <input
               type="text"
               value={state.trip.baggageLabel}
@@ -6467,7 +7247,7 @@ export default function App() {
               className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4FAF6] border border-[#DCEAE2] text-sm font-bold"
             />
             <p className="text-xs text-[#5B7368]">
-              包含隨身行李 1 件 (7kg) + 託運行李額度，戰利品與伴手禮輕鬆裝箱！
+              可記錄航空公司託運額度，或陸路通關必備證件（如：回鄉證 / 護照 / 台胞證、隨身行李箱等）！
             </p>
             <button
               type="button"
@@ -6544,6 +7324,17 @@ export default function App() {
             <div className="space-y-2">
               <button
                 type="button"
+                onClick={() => {
+                  setShowCloudShareModal(false);
+                  setShowTripSummaryModal(true);
+                }}
+                className="w-full py-2.5 rounded-xl bg-[#1A5D42] hover:bg-[#144832] text-white text-xs font-extrabold"
+              >
+                📋 一鍵圖文總結（HTML / PDF / 長圖 / WhatsApp）
+              </button>
+
+              <button
+                type="button"
                 onClick={handleExportJSON}
                 className="w-full py-2.5 rounded-xl bg-[#E3F1EC] hover:bg-[#d2e7df] text-[#154D36] text-xs font-extrabold"
               >
@@ -6564,6 +7355,19 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* 11.5. 一鍵旅程圖文總結與匯出 Modal */}
+      <TripSummaryModal
+        open={showTripSummaryModal}
+        onClose={() => setShowTripSummaryModal(false)}
+        state={state}
+        tripDays={tripDays}
+        weatherByDate={weatherByDate}
+        convertAmount={convertAmount}
+        stickers={stickers}
+        onUpdateStickers={setStickers}
+        onToast={showToast}
+      />
 
       {/* 12. 專案結構與 PWA 覆蓋整合指南 Modal */}
       <IntegrationGuideModal

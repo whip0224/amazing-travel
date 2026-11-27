@@ -55,6 +55,28 @@ export interface SmartPhraseResult {
   en: string;
 }
 
+export interface JournalDaySuggestion {
+  dayIndex: number;
+  dayHeadline: string;
+  dayStickerId: string;
+}
+
+export interface JournalActivitySuggestion {
+  activityId: string;
+  conciseLine: string;
+  stickerId: string;
+  stickerName: string;
+}
+
+export interface JournalSummaryAIResult {
+  journalTitle: string;
+  introQuote: string;
+  budgetHighlight: string;
+  heroStickerId: string;
+  daySummaries: JournalDaySuggestion[];
+  activitySuggestions: JournalActivitySuggestion[];
+}
+
 export interface GeminiClientResponse<T> {
   ok: boolean;
   missingApiKey?: boolean;
@@ -301,6 +323,22 @@ export async function optimizeItineraryViaServer(
     places,
     days,
     mode,
+  });
+}
+
+export async function generateJournalSummaryWithGemini(
+  payload: {
+    tripMeta: Record<string, unknown>;
+    days: unknown[];
+    activities: unknown[];
+    stickers: unknown[];
+  },
+  preferredModel?: GeminiModelOption
+): Promise<GeminiClientResponse<JournalSummaryAIResult>> {
+  return callGeminiEndpoint<JournalSummaryAIResult>({
+    action: 'summarize_journal',
+    preferredModel: preferredModel || getPreferredGeminiModel(),
+    ...payload,
   });
 }
 

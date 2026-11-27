@@ -12,12 +12,16 @@ export interface GeminiRequestPayload {
     | 'optimize_itinerary'
     | 'scan_receipt'
     | 'smart_phrase'
+    | 'summarize_journal'
     | 'hotel_photo'
     | 'hotel_address';
   mode?: 'fill_and_reorder' | 'rebalance_all';
   preferredModel?: GeminiModelId;
   days?: unknown[];
   places?: unknown[];
+  activities?: unknown[];
+  stickers?: unknown[];
+  tripMeta?: Record<string, unknown>;
   imageBase64?: string;
   mimeType?: string;
   query?: string;
@@ -768,6 +772,89 @@ export async function handleGeminiRequest(
               en: { type: Type.STRING },
             },
             required: ['emoji', 'zh', 'jp', 'romaji', 'en'],
+          },
+        },
+      });
+
+      const rawText = (response.text ?? '{}').trim();
+      const parsed = parseGeminiJson(rawText);
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          modelUsed,
+          retriedCount,
+          data: parsed,
+        },
+      };
+    }
+
+    if (payload.action === 'summarize_journal') {
+      const tripMeta = payload.tripMeta || {};
+      const days = Array.isArray(payload.days) ? payload.days : [];
+      const activities = Array.isArray(payload.activities) ? payload.activities : [];
+      const stickers = Array.isArray(payload.stickers) ? payload.stickers : [];
+
+      const prompt = `你是一位擅長撰寫日系旅遊手札與剪貼簿總結的編輯。請根據以下旅程資訊、每日行程與「使用者自備的貼紙插畫庫」，完成兩件事：
+1. 生成手札標題 (journalTitle)、60~100 字旅途亮點引言 (introQuote)、一句經費與消費亮點評語 (budgetHighlight)，並挑選一個最能代表整趟旅程的主貼紙 ID (heroStickerId)。
+2. 針對每一天生成簡短副標 (dayHeadline) 與建議貼紙 (dayStickerId)；針對每一個行程景點 (activityId) 濃縮成 10~24 字的手札短句 (conciseLine，例如「午茶：祇園抹茶聖代・必拍」)，並嚴格從下方貼紙清單中挑選最適合該景點的 stickerId 與 stickerName。
+
+⚠️ 重要：所有回傳的 heroStickerId、dayStickerId、stickerId 與 stickerName 必須嚴格出自下方「可用貼紙清單」，不可自行編造不存在的貼紙 ID。
+
+旅程概要：${JSON.stringify(tripMeta)}
+天數列表：${JSON.stringify(days)}
+行程景點列表：${JSON.stringify(activities)}
+可用貼紙清單：${JSON.stringify(stickers)}`;
+
+      const { response, modelUsed, retriedCount } = await generateContentSmart(apiKey, {
+        model: targetModel,
+        contents: prompt,
+        config: {
+          systemInstruction:
+            '你是繁體中文旅遊手札總結編輯。請用溫暖精煉的手帳口吻撰寫，並將所有輸出嚴格符合 JSON Schema。',
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              journalTitle: { type: Type.STRING },
+              introQuote: { type: Type.STRING },
+              budgetHighlight: { type: Type.STRING },
+              heroStickerId: { type: Type.STRING },
+              daySummaries: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    dayIndex: { type: Type.INTEGER },
+                    dayHeadline: { type: Type.STRING },
+                    dayStickerId: { type: Type.STRING },
+                  },
+                  required: ['dayIndex', 'dayHeadline', 'dayStickerId'],
+                },
+              },
+              activitySuggestions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    activityId: { type: Type.STRING },
+                    conciseLine: { type: Type.STRING },
+                    stickerId: { type: Type.STRING },
+                    stickerName: { type: Type.STRING },
+                  },
+                  required: ['activityId', 'conciseLine', 'stickerId', 'stickerName'],
+                },
+              },
+            },
+            required: [
+              'journalTitle',
+              'introQuote',
+              'budgetHighlight',
+              'heroStickerId',
+              'daySummaries',
+              'activitySuggestions',
+            ],
           },
         },
       });

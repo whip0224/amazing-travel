@@ -1,6 +1,9 @@
 export type TabKey = 'discover' | 'trips' | 'plan' | 'tools';
 
+export type TransportMode = 'flight' | 'hsr' | 'bus' | 'car' | 'ferry';
+
 export interface FlightLeg {
+  transportMode?: TransportMode;
   dateLabel: string;
   flightNo: string;
   departTime: string;
@@ -18,6 +21,7 @@ export interface FlightLeg {
 }
 
 export interface StayInfo {
+  id?: string;
   stars: number;
   category: string;
   hotelName: string;
@@ -26,6 +30,10 @@ export interface StayInfo {
   tag2: string;
   checkIn: string;
   checkOut: string;
+  checkInDate?: string;  // YYYY-MM-DD
+  checkOutDate?: string; // YYYY-MM-DD
+  checkInTime?: string;  // HH:mm
+  checkOutTime?: string; // HH:mm
   address: string;
   insiderScoop: string;
   paidStatus: string;
@@ -125,6 +133,24 @@ export interface ExpenseItem {
   photoUrl?: string;
 }
 
+export type StickerCategory =
+  | 'food'
+  | 'cafe'
+  | 'shrine'
+  | 'shopping'
+  | 'transport'
+  | 'landmark'
+  | 'decor';
+
+export interface StickerItem {
+  id: string;
+  name: string;
+  category: StickerCategory;
+  imageUrl: string;
+  keywords?: string[];
+  isCustom?: boolean;
+}
+
 export interface TabiState {
   enableSwipeFlip: boolean; // 控制 StPageFlip 是否支援手指左右滑動翻頁 (預設 false 關閉防誤觸)
   swipeEdgeOnly?: boolean;  // 開啟滑動時，是否僅限左右兩側邊緣 (24px) 觸發翻頁 (預設 true)
@@ -133,6 +159,7 @@ export interface TabiState {
   outbound: FlightLeg;
   inbound: FlightLeg;
   stay: StayInfo;
+  stays?: StayInfo[];
   destinations: SavedDestination[]; // 目的地清單 (可手動輸入或從 Location PWA 匯入並編排日期)
   activities: PlanActivity[];
   expenses: ExpenseItem[];
@@ -264,19 +291,45 @@ export const DEFAULT_TABI_STATE: TabiState = {
     perkLabel: '戰利品伴手禮滿載 🎁',
   },
   stay: {
+    id: 'stay-1',
     stars: 4,
     category: 'Boutique Hotel',
     hotelName: 'The Gate Hotel Kyoto',
     subTitle: 'Takasegawa by HULIC · Deluxe King',
     tag1: '高瀨川河景房',
     tag2: '含免費精緻早餐',
-    checkIn: 'Apr 12 · 3:00 PM',
-    checkOut: 'Apr 17 · 11:00 AM',
+    checkIn: '04/12 · 15:00',
+    checkOut: '04/17 · 11:00',
+    checkInDate: '2027-04-12',
+    checkOutDate: '2027-04-17',
+    checkInTime: '15:00',
+    checkOutTime: '11:00',
     address: '310-2 Bizenjimacho, Nakagyo-ku, Kyoto',
     insiderScoop: '櫃檯人員有私房宇治抹茶名店清單，下雨天還能免費借用木屐與和傘！',
     paidStatus: 'Paid & Booked',
     photoUrl: '/assets/tabi/hotel_kyoto.png',
   },
+  stays: [
+    {
+      id: 'stay-1',
+      stars: 4,
+      category: 'Boutique Hotel',
+      hotelName: 'The Gate Hotel Kyoto',
+      subTitle: 'Takasegawa by HULIC · Deluxe King',
+      tag1: '高瀨川河景房',
+      tag2: '含免費精緻早餐',
+      checkIn: '04/12 · 15:00',
+      checkOut: '04/17 · 11:00',
+      checkInDate: '2027-04-12',
+      checkOutDate: '2027-04-17',
+      checkInTime: '15:00',
+      checkOutTime: '11:00',
+      address: '310-2 Bizenjimacho, Nakagyo-ku, Kyoto',
+      insiderScoop: '櫃檯人員有私房宇治抹茶名店清單，下雨天還能免費借用木屐與和傘！',
+      paidStatus: 'Paid & Booked',
+      photoUrl: '/assets/tabi/hotel_kyoto.png',
+    },
+  ],
   destinations: [
     {
       id: 'dest-kyoto-1',
