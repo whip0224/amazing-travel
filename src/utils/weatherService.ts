@@ -17,12 +17,12 @@ interface GeoCoords {
   longitude: number;
 }
 
-const GEO_CACHE_KEY = 'tabi_weather_geo_v2';
-const WEATHER_CACHE_KEY = 'tabi_weather_daily_v2';
+const GEO_CACHE_KEY = 'tabi_weather_geo_v3';
+const WEATHER_CACHE_KEY = 'tabi_weather_daily_v3';
 const FORECAST_TTL_MS = 2 * 60 * 60 * 1000; // 2 小時
 const ARCHIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 天
 
-// 常用旅遊城市座標快查（秒回，且可避免中英文混打、旅遊描述詞或同名小鎮誤配）
+// 常用旅遊城市／行政區座標快查（秒回，且可避免中英文混打、旅遊描述詞或同名小鎮誤配）
 const KNOWN_CITIES: Array<{ keywords: string[]; coords: GeoCoords }> = [
   { keywords: ['kyoto', '京都'], coords: { name: '京都', latitude: 35.0116, longitude: 135.7681 } },
   { keywords: ['osaka', '大阪'], coords: { name: '大阪', latitude: 34.6937, longitude: 135.5023 } },
@@ -40,7 +40,9 @@ const KNOWN_CITIES: Array<{ keywords: string[]; coords: GeoCoords }> = [
   { keywords: ['hakone', '箱根'], coords: { name: '箱根', latitude: 35.2324, longitude: 139.1069 } },
   { keywords: ['karuizawa', '輕井澤'], coords: { name: '輕井澤', latitude: 36.3489, longitude: 138.5967 } },
   { keywords: ['kawaguchiko', 'mt fuji', '河口湖', '富士山'], coords: { name: '河口湖', latitude: 35.4981, longitude: 138.7686 } },
-  { keywords: ['zhuhai', '珠海', '橫琴', '拱北'], coords: { name: '珠海', latitude: 22.2769, longitude: 113.5678 } },
+  { keywords: ['斗門', 'doumen'], coords: { name: '珠海斗門', latitude: 22.2089, longitude: 113.2966 } },
+  { keywords: ['金灣', 'jinwan'], coords: { name: '珠海金灣', latitude: 22.1467, longitude: 113.3474 } },
+  { keywords: ['香洲', 'xiangzhou', 'zhuhai', '珠海', '橫琴', '拱北'], coords: { name: '珠海', latitude: 22.2769, longitude: 113.5678 } },
   { keywords: ['macau', 'macao', '澳門'], coords: { name: '澳門', latitude: 22.1987, longitude: 113.5439 } },
   { keywords: ['hong kong', '香港'], coords: { name: '香港', latitude: 22.3193, longitude: 114.1694 } },
   { keywords: ['shenzhen', '深圳'], coords: { name: '深圳', latitude: 22.5431, longitude: 114.0579 } },
@@ -117,21 +119,120 @@ function writeCacheEntry<T>(key: string, entryKey: string, data: T): void {
   }
 }
 
-function extractCityQuery(destinationTitle: string): string {
-  const cleaned = destinationTitle
-    .split(/[,，/|｜·(（]/)[0]
-    .replace(/\s*(自由行|親子遊|深度遊|慢旅|小旅行|旅遊|旅行|攻略|行程|\d+天\d+夜|\d+日遊|\d+日)$/i, '')
-    .replace(/\s+(中國大陸|中國|香港|澳門|日本|台灣|臺灣|韓國|泰國|越南|馬來西亞|新加坡|China|Japan|Taiwan|Korea|Thailand|Vietnam|Malaysia|Singapore)$/i, '')
-    .trim();
-  return cleaned.length > 2 && cleaned.endsWith('市') ? cleaned.slice(0, -1) : cleaned;
+const COUNTRY_HINT_RULES: Array<{ pattern: RegExp; code: string }> = [
+  { pattern: /日本|japan/i, code: 'JP' },
+  {
+    pattern: /中國大陸|中國|china|廣東|广东|廣西|四川|福建|浙江|江蘇|江苏|山東|山东|湖南|湖北|北京|上海|珠海|深圳|廣州|惠州|清遠|東莞|佛山|中山|蘇州/i,
+    code: 'CN',
+  },
+  { pattern: /台灣|臺灣|taiwan/i, code: 'TW' },
+  { pattern: /香港|hong\s*kong/i, code: 'HK' },
+  { pattern: /澳門|macau|macao/i, code: 'MO' },
+  { pattern: /韓國|南韓|korea/i, code: 'KR' },
+  { pattern: /泰國|thailand/i, code: 'TH' },
+  { pattern: /越南|vietnam/i, code: 'VN' },
+  { pattern: /馬來西亞|malaysia/i, code: 'MY' },
+  { pattern: /新加坡|singapore/i, code: 'SG' },
+  { pattern: /美國|united\s*states|\busa\b/i, code: 'US' },
+  { pattern: /英國|united\s*kingdom|\buk\b/i, code: 'GB' },
+  { pattern: /法國|france/i, code: 'FR' },
+  { pattern: /澳洲|australia/i, code: 'AU' },
+];
+
+function detectCountryCodeHints(raw: string): string[] {
+  const hints: string[] = [];
+  for (const rule of COUNTRY_HINT_RULES) {
+    if (rule.pattern.test(raw) && !hints.includes(rule.code)) {
+      hints.push(rule.code);
+    }
+  }
+  return hints;
 }
 
-function scoreGeoCandidate(candidate: any): number {
+function stripTravelNoise(raw: string): string {
+  return raw
+    .replace(/(自由行|親子遊|深度遊|慢旅|小旅行|旅遊|旅行|攻略|行程|\d+天\d+夜|\d+日遊|\d+日)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractCityQuery(destinationTitle: string): string {
+  const tokens = stripTravelNoise(destinationTitle)
+    .split(/[\s,，/|｜·(（)）]+/)
+    .map((t) => t.trim())
+    .filter(
+      (t) =>
+        Boolean(t) &&
+        !/^(中國大陸|中國|香港|澳門|日本|台灣|臺灣|韓國|南韓|泰國|越南|馬來西亞|新加坡|美國|英國|法國|澳洲|China|Japan|Taiwan|Korea|Thailand|Vietnam|Malaysia|Singapore|USA|UK|France|Australia)$/i.test(
+          t
+        )
+    );
+  const candidate = tokens[0] || stripTravelNoise(destinationTitle);
+  return candidate.length > 2 && candidate.endsWith('市') ? candidate.slice(0, -1) : candidate;
+}
+
+function scoreGeoCandidate(candidate: any, expectedCountryCodes: string[]): number {
   const pop = typeof candidate?.population === 'number' ? candidate.population : 0;
   const fc = String(candidate?.feature_code || '');
+  const cc = String(candidate?.country_code || '').toUpperCase();
+  const countryBonus = expectedCountryCodes.length > 0 && expectedCountryCodes.includes(cc) ? 50_000_000 : 0;
   const adminBonus =
     fc === 'PPLC' ? 5_000_000 : fc === 'PPLA' ? 2_000_000 : fc === 'PPLA2' ? 1_000_000 : fc === 'PPLA3' ? 300_000 : 0;
-  return pop + adminBonus;
+  return countryBonus + pop + adminBonus;
+}
+
+async function geocodeViaNominatim(
+  query: string,
+  expectedCountryCodes: string[],
+  signal?: AbortSignal
+): Promise<GeoCoords | null> {
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&accept-language=zh-TW,zh-CN,en&q=${encodeURIComponent(
+      query
+    )}`;
+    const res = await fetch(url, { signal });
+    if (!res.ok) return null;
+    const rows: any[] = await res.json();
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+
+    const scored = rows
+      .filter((r) => r?.lat && r?.lon && Number.isFinite(Number(r.lat)) && Number.isFinite(Number(r.lon)))
+      .map((r) => {
+        const cc = String(r.address?.country_code || '').toUpperCase();
+        const countryMatch = expectedCountryCodes.length > 0 && expectedCountryCodes.includes(cc) ? 100 : 0;
+        const cls = String(r.class || '');
+        const tp = String(r.type || '');
+        const placeBonus =
+          cls === 'boundary' || cls === 'place' || ['city', 'town', 'administrative', 'suburb', 'district', 'county'].includes(tp)
+            ? 20
+            : cls === 'railway' || cls === 'highway' || cls === 'amenity'
+            ? -15
+            : 0;
+        const imp = Number(r.importance) || 0;
+        return { row: r, score: countryMatch + placeBonus + imp };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    const best = scored[0]?.row;
+    if (!best) return null;
+
+    const addrCity =
+      best.address?.city ||
+      best.address?.town ||
+      best.address?.county ||
+      best.address?.state_district ||
+      best.name ||
+      query;
+    const displayCity = String(addrCity).replace(/市$/, '') || best.name || query;
+
+    return {
+      name: displayCity,
+      latitude: Number(best.lat),
+      longitude: Number(best.lon),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function geocodeDestination(
@@ -148,39 +249,67 @@ export async function geocodeDestination(
     }
   }
 
-  const cleanCity = extractCityQuery(raw) || raw;
-  const cacheKey = cleanCity.toLowerCase();
+  const cacheKey = lower;
   const cachedMap = readCacheMap<GeoCoords>(GEO_CACHE_KEY);
   const cached = cachedMap[cacheKey];
   if (cached && Date.now() - cached.ts < ARCHIVE_TTL_MS) {
     return cached.data;
   }
 
+  const cleanedFull = stripTravelNoise(raw) || raw;
+  const expectedCountryCodes = detectCountryCodeHints(raw);
+  const hasCompoundQualifier = /[\s,，/|｜·(（]/.test(cleanedFull);
+
+  // 1. 若有明確國家／省份／行政區限定詞（如「日本 松山」「珠海 香洲區」「廣東 清遠」），優先用 Nominatim 複合定位避免同名城市誤判
+  if (hasCompoundQualifier) {
+    const nomCoords = await geocodeViaNominatim(cleanedFull, expectedCountryCodes, signal);
+    if (nomCoords) {
+      writeCacheEntry(GEO_CACHE_KEY, cacheKey, nomCoords);
+      return nomCoords;
+    }
+  }
+
+  // 2. 使用 Open-Meteo Geocoding（並優先比對人口數與國家代碼）
+  const cleanCity = extractCityQuery(raw) || cleanedFull;
   try {
     const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
       cleanCity
-    )}&count=5&language=zh&format=json`;
+    )}&count=8&language=zh&format=json`;
     const res = await fetch(url, { signal });
-    if (!res.ok) return null;
-    const json: any = await res.json();
-    const candidates: any[] = Array.isArray(json?.results) ? json.results : [];
-    const valid = candidates.filter(
-      (r) => typeof r?.latitude === 'number' && typeof r?.longitude === 'number'
-    );
-    if (valid.length === 0) {
-      return null;
+    if (res.ok) {
+      const json: any = await res.json();
+      const candidates: any[] = Array.isArray(json?.results) ? json.results : [];
+      const valid = candidates.filter(
+        (r) => typeof r?.latitude === 'number' && typeof r?.longitude === 'number'
+      );
+      if (valid.length > 0) {
+        const best = valid.sort(
+          (a, b) => scoreGeoCandidate(b, expectedCountryCodes) - scoreGeoCandidate(a, expectedCountryCodes)
+        )[0];
+        const bestCc = String(best?.country_code || '').toUpperCase();
+        if (expectedCountryCodes.length === 0 || expectedCountryCodes.includes(bestCc)) {
+          const coords: GeoCoords = {
+            name: best.name || cleanCity,
+            latitude: best.latitude,
+            longitude: best.longitude,
+          };
+          writeCacheEntry(GEO_CACHE_KEY, cacheKey, coords);
+          return coords;
+        }
+      }
     }
-    const best = valid.sort((a, b) => scoreGeoCandidate(b) - scoreGeoCandidate(a))[0];
-    const coords: GeoCoords = {
-      name: best.name || cleanCity,
-      latitude: best.latitude,
-      longitude: best.longitude,
-    };
-    writeCacheEntry(GEO_CACHE_KEY, cacheKey, coords);
-    return coords;
   } catch {
-    return null;
+    // fall through to Nominatim
   }
+
+  // 3. 保底使用 Nominatim 查詢（支援繁簡體如「清遠」「和歌山」及複合地名）
+  const fallbackCoords = await geocodeViaNominatim(cleanedFull, expectedCountryCodes, signal);
+  if (fallbackCoords) {
+    writeCacheEntry(GEO_CACHE_KEY, cacheKey, fallbackCoords);
+    return fallbackCoords;
+  }
+
+  return null;
 }
 
 function toIsoDate(d: Date): string {

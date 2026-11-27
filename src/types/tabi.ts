@@ -151,6 +151,18 @@ export interface StickerItem {
   isCustom?: boolean;
 }
 
+export type TripBaseCostMode = 'separate' | 'package';
+
+export interface TripBaseCosts {
+  mode: TripBaseCostMode; // 'separate' = 旅費與住宿費分開記錄；'package' = 總價(套餐)
+  currency: string;
+  travelCost: number;
+  hotelCost: number;
+  packageCost: number;
+  note?: string;
+  includeInBudget?: boolean;
+}
+
 export interface TabiState {
   enableSwipeFlip: boolean; // 控制 StPageFlip 是否支援手指左右滑動翻頁 (預設 false 關閉防誤觸)
   swipeEdgeOnly?: boolean;  // 開啟滑動時，是否僅限左右兩側邊緣 (24px) 觸發翻頁 (預設 true)
@@ -163,6 +175,7 @@ export interface TabiState {
   destinations: SavedDestination[]; // 目的地清單 (可手動輸入或從 Location PWA 匯入並編排日期)
   activities: PlanActivity[];
   expenses: ExpenseItem[];
+  tripBaseCosts?: TripBaseCosts;
   totalBudgetJPY: number;
   currencyA: string;
   currencyB: string;
@@ -575,6 +588,15 @@ export const DEFAULT_TABI_STATE: TabiState = {
       createdAt: '2027-04-12 14:50',
     },
   ],
+  tripBaseCosts: {
+    mode: 'separate',
+    currency: 'HKD',
+    travelCost: 0,
+    hotelCost: 0,
+    packageCost: 0,
+    note: '',
+    includeInBudget: false,
+  },
   totalBudgetJPY: 103000,
   currencyA: 'JPY',
   currencyB: 'USD',

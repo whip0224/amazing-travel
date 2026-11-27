@@ -662,11 +662,11 @@ export async function searchHotelCandidates(
       }
     }
 
-    // 只有當輸入字串本身「沒有包含任何城市/商圈名稱」時，才附加目前旅程目的地作為輔助搜尋
+    // 只有當輸入字串本身「沒有包含任何城市/商圈名稱」時，優先將目前旅程目的地（如「珠海 香洲區」「日本 大阪」）加入第一筆搜尋，大幅減少同名飯店撞名機率
     if (destinationHint && !queryAlreadyHasLocationKeyword(qLower)) {
       const cleanDest = destinationHint.split(',')[0].trim();
       if (cleanDest) {
-        searchQueries.push(`${q} ${cleanDest}`);
+        searchQueries.unshift(`${q} ${cleanDest}`);
       }
     }
 

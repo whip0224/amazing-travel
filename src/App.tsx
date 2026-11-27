@@ -68,6 +68,7 @@ import {
   type StayInfo,
   type StickerItem,
   type TransportMode,
+  type TripBaseCosts,
 } from './types/tabi';
 import { DEFAULT_STICKERS } from './utils/defaultStickers';
 import {
@@ -265,6 +266,10 @@ const loadInitialTabiState = (): TabiState => {
           : DEFAULT_TABI_STATE.destinations,
         activities: rawActivities,
         expenses: Array.isArray(parsed.expenses) ? parsed.expenses : DEFAULT_TABI_STATE.expenses,
+        tripBaseCosts: {
+          ...DEFAULT_TABI_STATE.tripBaseCosts!,
+          ...(parsed.tripBaseCosts || {}),
+        },
       };
     }
   } catch (e) {
@@ -1338,10 +1343,61 @@ export default function App() {
     return `1 ${state.currencyB} ≈ ${rate.toFixed(2)} ${state.currencyA} · ${fxLiveStatus}`;
   }, [state.currencyA, state.currencyB, ratesFromUSD, fxLiveStatus]);
 
+  // 旅費與住宿費（分開記錄 / 套餐總價）
+  const baseCosts: TripBaseCosts = useMemo(
+    () => ({
+      mode: state.tripBaseCosts?.mode === 'package' ? 'package' : 'separate',
+      currency: state.tripBaseCosts?.currency || 'HKD',
+      travelCost: Math.max(0, Number(state.tripBaseCosts?.travelCost) || 0),
+      hotelCost: Math.max(0, Number(state.tripBaseCosts?.hotelCost) || 0),
+      packageCost: Math.max(0, Number(state.tripBaseCosts?.packageCost) || 0),
+      note: state.tripBaseCosts?.note || '',
+      includeInBudget: Boolean(state.tripBaseCosts?.includeInBudget),
+    }),
+    [state.tripBaseCosts]
+  );
+
+  const baseCurObj = useMemo(
+    () => CURRENCIES.find((c) => c.code === baseCosts.currency) || CURRENCIES[0],
+    [baseCosts.currency]
+  );
+
+  const baseCostsNativeTotal = useMemo(
+    () =>
+      baseCosts.mode === 'package'
+        ? baseCosts.packageCost
+        : baseCosts.travelCost + baseCosts.hotelCost,
+    [baseCosts]
+  );
+
+  const baseCostsJPY = useMemo(
+    () => Math.round(convertAmount(baseCostsNativeTotal, baseCosts.currency, 'JPY')),
+    [baseCostsNativeTotal, baseCosts.currency, ratesFromUSD]
+  );
+
+  const updateTripBaseCosts = (updates: Partial<TripBaseCosts>) => {
+    setState((prev) => ({
+      ...prev,
+      tripBaseCosts: {
+        ...DEFAULT_TABI_STATE.tripBaseCosts!,
+        ...(prev.tripBaseCosts || {}),
+        ...updates,
+      },
+    }));
+  };
+
   // 消費統計
-  const totalSpentJPY = useMemo(
+  const dailyExpensesJPY = useMemo(
     () => state.expenses.reduce((sum, item) => sum + (Number(item.amountJPY) || 0), 0),
     [state.expenses]
+  );
+  const totalSpentJPY = useMemo(
+    () => dailyExpensesJPY + (baseCosts.includeInBudget ? baseCostsJPY : 0),
+    [dailyExpensesJPY, baseCosts.includeInBudget, baseCostsJPY]
+  );
+  const grandTotalTripJPY = useMemo(
+    () => dailyExpensesJPY + baseCostsJPY,
+    [dailyExpensesJPY, baseCostsJPY]
   );
   const remainingBudgetJPY = Math.max(0, state.totalBudgetJPY - totalSpentJPY);
   const budgetSpentPercent = Math.min(
@@ -1374,7 +1430,7 @@ export default function App() {
     };
     return EXPENSE_CATEGORIES.map((cat) => {
       const val = categoryTotals[cat.key] || 0;
-      const pct = totalSpentJPY > 0 ? Math.round((val / totalSpentJPY) * 100) : 0;
+      const pct = dailyExpensesJPY > 0 ? Math.round((val / dailyExpensesJPY) * 100) : 0;
       return {
         key: cat.key,
         name: cat.zhTitle.split(' ')[0],
@@ -1384,7 +1440,7 @@ export default function App() {
         color: colorMap[cat.key],
       };
     });
-  }, [categoryTotals, totalSpentJPY]);
+  }, [categoryTotals, dailyExpensesJPY]);
 
   const latestExpense = useMemo(() => {
     if (state.expenses.length > 0) {
@@ -5156,6 +5212,252 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* ✈️🏨 旅費與住宿費紀錄（支援兩者分開記錄 / 套餐總價） */}
+                <div
+                  className="rounded-[26px] bg-white p-4 space-y-3 border border-[#D4E8DF] shadow-2xs"
+                  data-no-flip="true"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-1.5 text-[15px] font-extrabold text-[#152820]">
+                        <BedDouble className="w-4 h-4 text-[#1B6747]" />
+                        <span>旅費與住宿費</span>
+                      </div>
+                      <p className="text-[11px] text-[#5B7368] font-medium">
+                        記錄機票車船與飯店費用（可分開或填套餐總價）
+                      </p>
+                    </div>
+
+                    {/* 模式切換：分開記錄 vs 套餐總價 */}
+                    <div className="inline-flex rounded-full bg-[#EAF3EE] p-1 border border-[#D4E8DF]">
+                      <button
+                        type="button"
+                        onClick={() => updateTripBaseCosts({ mode: 'separate' })}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold transition ${
+                          baseCosts.mode === 'separate'
+                            ? 'bg-[#1A5D42] text-white shadow-2xs'
+                            : 'text-[#3F5C4E] hover:text-[#152820]'
+                        }`}
+                      >
+                        🧾 兩者分開
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateTripBaseCosts({ mode: 'package' })}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold transition ${
+                          baseCosts.mode === 'package'
+                            ? 'bg-[#DF6437] text-white shadow-2xs'
+                            : 'text-[#3F5C4E] hover:text-[#152820]'
+                        }`}
+                      >
+                        🎁 總價(套餐)
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 幣別選擇與計入總預算切換 */}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-extrabold text-[#4A6357]">計價幣別:</span>
+                      <select
+                        value={baseCosts.currency}
+                        onChange={(e) => updateTripBaseCosts({ currency: e.target.value })}
+                        className="px-2.5 py-1 rounded-xl bg-[#F4FAF6] border border-[#CFE3D8] text-[11.5px] font-extrabold text-[#152820] focus:outline-none focus:border-[#1A5D42]"
+                      >
+                        {CURRENCIES.map((c) => (
+                          <option key={c.code} value={c.code}>
+                            {c.flag} {c.code} ({c.symbol})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateTripBaseCosts({ includeInBudget: !baseCosts.includeInBudget })
+                      }
+                      className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold border inline-flex items-center gap-1 transition ${
+                        baseCosts.includeInBudget
+                          ? 'bg-[#E2F3EA] border-[#9AD8BA] text-[#14532D]'
+                          : 'bg-[#F8FBF9] border-[#DCEAE2] text-[#5B7368] hover:bg-[#EAF4EF]'
+                      }`}
+                    >
+                      {baseCosts.includeInBudget && <Check className="w-3 h-3" />}
+                      <span>{baseCosts.includeInBudget ? '已計入總預算進度' : '+ 計入總預算進度'}</span>
+                    </button>
+                  </div>
+
+                  {/* 輸入區：分開記錄 OR 套餐總價 */}
+                  {baseCosts.mode === 'separate' ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div className="rounded-2xl bg-[#F4FAF6] p-3 border border-[#DCEAE2] space-y-1">
+                        <label className="text-[11.5px] font-extrabold text-[#1C6748] flex items-center gap-1">
+                          <span>🚄 旅費（交通／機票／車船）</span>
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-black text-[#4A6357] shrink-0">
+                            {baseCurObj.symbol}
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            inputMode="decimal"
+                            placeholder="0"
+                            value={baseCosts.travelCost === 0 ? '' : baseCosts.travelCost}
+                            onChange={(e) => {
+                              const v = parseFloat(e.target.value);
+                              updateTripBaseCosts({
+                                travelCost: Number.isFinite(v) && v >= 0 ? v : 0,
+                              });
+                            }}
+                            className="w-full min-w-0 bg-white px-2.5 py-1.5 rounded-xl border border-[#CFE3D8] text-sm font-black text-[#14241D] tabular-nums focus:outline-none focus:border-[#1A5D42]"
+                          />
+                        </div>
+                        <div className="text-[10.5px] font-bold text-[#5B7368] tabular-nums">
+                          ≈ ¥{Math.round(convertAmount(baseCosts.travelCost, baseCosts.currency, 'JPY')).toLocaleString()}
+                          {baseCosts.currency !== state.currencyB && (
+                            <span>
+                              {' '}
+                              · {curBObj.symbol}
+                              {convertAmount(baseCosts.travelCost, baseCosts.currency, state.currencyB).toLocaleString(undefined, {
+                                minimumFractionDigits: state.currencyB === 'JPY' || state.currencyB === 'KRW' ? 0 : 0,
+                                maximumFractionDigits: state.currencyB === 'JPY' || state.currencyB === 'KRW' ? 0 : 2,
+                              })}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl bg-[#FFF8F5] p-3 border border-[#F3DDD3] space-y-1">
+                        <label className="text-[11.5px] font-extrabold text-[#B53D1B] flex items-center gap-1">
+                          <span>🏨 住宿費（飯店／民宿總計）</span>
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-black text-[#8F4A33] shrink-0">
+                            {baseCurObj.symbol}
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            inputMode="decimal"
+                            placeholder="0"
+                            value={baseCosts.hotelCost === 0 ? '' : baseCosts.hotelCost}
+                            onChange={(e) => {
+                              const v = parseFloat(e.target.value);
+                              updateTripBaseCosts({
+                                hotelCost: Number.isFinite(v) && v >= 0 ? v : 0,
+                              });
+                            }}
+                            className="w-full min-w-0 bg-white px-2.5 py-1.5 rounded-xl border border-[#ECD3C8] text-sm font-black text-[#14241D] tabular-nums focus:outline-none focus:border-[#DF6437]"
+                          />
+                        </div>
+                        <div className="text-[10.5px] font-bold text-[#7A584C] tabular-nums">
+                          ≈ ¥{Math.round(convertAmount(baseCosts.hotelCost, baseCosts.currency, 'JPY')).toLocaleString()}
+                          {baseCosts.currency !== state.currencyB && (
+                            <span>
+                              {' '}
+                              · {curBObj.symbol}
+                              {convertAmount(baseCosts.hotelCost, baseCosts.currency, state.currencyB).toLocaleString(undefined, {
+                                minimumFractionDigits: 0,
+                                maximumFractionDigits: state.currencyB === 'JPY' || state.currencyB === 'KRW' ? 0 : 2,
+                              })}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl bg-[#FFF8F5] p-3 border border-[#F3DDD3] space-y-1.5">
+                      <label className="text-[11.5px] font-extrabold text-[#B53D1B] flex items-center justify-between gap-2">
+                        <span>🎁 套餐總價（交通＋住宿套票總額）</span>
+                        <span className="text-[10px] font-bold text-[#8F4A33]">機加酒 / 車票＋酒店</span>
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <span className="text-base font-black text-[#8F4A33] shrink-0">
+                          {baseCurObj.symbol}
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          inputMode="decimal"
+                          placeholder="0"
+                          value={baseCosts.packageCost === 0 ? '' : baseCosts.packageCost}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            updateTripBaseCosts({
+                              packageCost: Number.isFinite(v) && v >= 0 ? v : 0,
+                            });
+                          }}
+                          className="w-full min-w-0 bg-white px-3 py-2 rounded-xl border border-[#ECD3C8] text-base font-black text-[#14241D] tabular-nums focus:outline-none focus:border-[#DF6437]"
+                        />
+                      </div>
+                      <div className="text-[10.5px] font-bold text-[#7A584C] tabular-nums">
+                        折合約 ¥{baseCostsJPY.toLocaleString()}
+                        {baseCosts.currency !== state.currencyB && (
+                          <span>
+                            {' '}
+                            · {curBObj.symbol}
+                            {convertAmount(baseCosts.packageCost, baseCosts.currency, state.currencyB).toLocaleString(undefined, {
+                              minimumFractionDigits: 0,
+                              maximumFractionDigits: state.currencyB === 'JPY' || state.currencyB === 'KRW' ? 0 : 2,
+                            })}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 選填備註 */}
+                  <input
+                    type="text"
+                    value={baseCosts.note || ''}
+                    onChange={(e) => updateTripBaseCosts({ note: e.target.value })}
+                    placeholder={
+                      baseCosts.mode === 'package'
+                        ? '備註（選填）：例如 高鐵來回＋珠海兩晚酒店套票...'
+                        : '備註（選填）：例如 金巴來回＋兩晚酒店連早餐...'
+                    }
+                    className="w-full px-3 py-1.5 rounded-xl bg-[#F7FBF9] border border-[#E2EFE8] text-[11.5px] font-medium text-[#2A4236] placeholder:text-[#7E9489] focus:outline-none focus:border-[#1A5D42]"
+                  />
+
+                  {/* 旅費住宿小計與全趟旅程總支出合計 */}
+                  <div className="rounded-2xl bg-[#EAF4EF] px-3.5 py-2.5 border border-[#CDE5D9] flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="text-[10.5px] font-extrabold text-[#3E5E4F]">
+                        {baseCosts.mode === 'package' ? '套餐總價' : '旅費＋住宿合計'}
+                      </div>
+                      <div className="text-[14px] font-black text-[#14241D] tabular-nums">
+                        {baseCurObj.symbol}
+                        {baseCostsNativeTotal.toLocaleString(undefined, {
+                          minimumFractionDigits: 0,
+                          maximumFractionDigits: 2,
+                        })}
+                        <span className="text-[11px] font-bold text-[#4A6357] ml-1.5">
+                          (≈ ¥{baseCostsJPY.toLocaleString()})
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <div className="text-[10.5px] font-extrabold text-[#B53D1B]">
+                        全趟總支出（含日常記帳）
+                      </div>
+                      <div className="text-[14px] font-black text-[#B53D1B] tabular-nums">
+                        ¥{grandTotalTripJPY.toLocaleString()}
+                        <span className="text-[10.5px] font-bold text-[#6E5D54] ml-1">
+                          ({curBObj.symbol}
+                          {convertAmount(grandTotalTripJPY, 'JPY', state.currencyB).toLocaleString(undefined, {
+                            minimumFractionDigits: 0,
+                            maximumFractionDigits: state.currencyB === 'JPY' || state.currencyB === 'KRW' ? 0 : 2,
+                          })}
+                          )
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 {/* 📋 一鍵旅程總結與圖文匯出入口 */}
                 <button
                   type="button"
@@ -5262,7 +5564,7 @@ export default function App() {
                             <span>四大類別消費預算佔比</span>
                           </div>
                           <p className="text-[11px] text-[#5B7368] mt-0.5">
-                            總花費 ¥{totalSpentJPY.toLocaleString()} · 點擊下方類別可篩選明細
+                            日常消費 ¥{dailyExpensesJPY.toLocaleString()} · 點擊下方類別可篩選明細
                           </p>
                         </div>
                         <span className="px-2.5 py-1 rounded-full bg-[#EAF4EF] text-[#1A5D42] text-[11px] font-extrabold tabular-nums">
@@ -5270,7 +5572,7 @@ export default function App() {
                         </span>
                       </div>
 
-                      {totalSpentJPY > 0 ? (
+                      {dailyExpensesJPY > 0 ? (
                         <div className="h-[200px] w-full relative">
                           <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
@@ -5295,8 +5597,8 @@ export default function App() {
                               <Tooltip
                                 formatter={(value: any, name: any) => [
                                   `¥${Number(value || 0).toLocaleString()} (${
-                                    totalSpentJPY > 0
-                                      ? Math.round((Number(value || 0) / totalSpentJPY) * 100)
+                                    dailyExpensesJPY > 0
+                                      ? Math.round((Number(value || 0) / dailyExpensesJPY) * 100)
                                       : 0
                                   }%)`,
                                   String(name),
@@ -5312,9 +5614,9 @@ export default function App() {
                           </ResponsiveContainer>
                           {/* 圓餅圖中心總額標籤 */}
                           <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-                            <span className="text-[10px] font-bold text-[#6E7F77]">總支出</span>
+                            <span className="text-[10px] font-bold text-[#6E7F77]">日常支出</span>
                             <span className="text-[13.5px] font-black text-[#14241D] tabular-nums">
-                              ¥{totalSpentJPY.toLocaleString()}
+                              ¥{dailyExpensesJPY.toLocaleString()}
                             </span>
                           </div>
                         </div>
